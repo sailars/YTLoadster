@@ -1,0 +1,172 @@
+name: Build macOS DMG
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/macos-dmg.yml'
+      - 'scripts/prepare-macos-tools.sh'
+      - 'src-tauri/**'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS Intel (x64)
+            runner: macos-15-intel
+            architecture: x64
+            expected_architecture: x86_64
+          - label: macOS Apple Silicon (arm64)
+            runner: macos-14
+            architecture: arm64
+            expected_architecture: arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test -- --run
+
+      - name: Install Intel FFmpeg build tool
+        if: matrix.architecture == 'x64'
+        run: |
+          brew install nasm
+          nasm -version
+
+      - name: Prepare and verify bundled tools
+        run: |
+          chmod +x scripts/prepare-macos-tools.sh
+          scripts/prepare-macos-tools.sh "${{ matrix.architecture }}"
+          test "$(uname -m)" = "${{ matrix.expected_architecture }}"
+          lipo -archs src-tauri/resources/macos/tools/deno | grep -x "${{ matrix.expected_architecture }}"
+          lipo -archs src-tauri/resources/macos/tools/ffmpeg | grep -x "${{ matrix.expected_architecture }}"
+          lipo -archs src-tauri/resources/macos/tools/ffprobe | grep -x "${{ matrix.expected_architecture }}"
+          lipo -archs src-tauri/resources/macos/tools/libmp3lame.0.dylib | grep -x "${{ matrix.expected_architecture }}"
+          lipo -archs src-tauri/resources/macos/tools/yt-dlp_macos | grep -Eq 'x86_64.*arm64|arm64.*x86_64'
+          src-tauri/resources/macos/tools/ffmpeg -hide_banner -encoders | grep -q 'libmp3lame'
+          if ! otool -L src-tauri/resources/macos/tools/ffmpeg | grep -q '@loader_path/libmp3lame.0.dylib'; then
+            echo "FFmpeg must refer to the bundled LAME library" >&2
+            exit 1
+          fi
+
+      - name: Ad-hoc sign bundled tools
+        run: |
+          for tool in src-tauri/resources/macos/tools/yt-dlp_macos src-tauri/resources/macos/tools/deno src-tauri/resources/macos/tools/ffmpeg src-tauri/resources/macos/tools/ffprobe src-tauri/resources/macos/tools/libmp3lame.0.dylib; do
+            codesign --force --sign - --timestamp=none "$tool"
+            codesign --verify --strict --verbose=2 "$tool"
+          done
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build macOS application bundle
+        run: npm run tauri -- build --config src-tauri/tauri.macos.conf.json --bundles app
+
+      - name: Package DMG without Finder automation
+        run: |
+          app_path="$(find src-tauri/target -type d -path '*/release/bundle/macos/YTLoadster.app' -print -quit)"
+          if [ -z "$app_path" ]; then
+            echo "YTLoadster.app was not found. Available bundle output:" >&2
+            find src-tauri/target -path '*bundle*' -print
+            exit 1
+          fi
+
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+
+          staging_dir="$(mktemp -d)"
+          dmg_dir="src-tauri/target/release/bundle/dmg"
+          dmg_path="$dmg_dir/YTLoadster_0.1.0_${{ matrix.architecture }}.dmg"
+          cleanup() {
+            rm -rf "$staging_dir"
+          }
+          trap cleanup EXIT
+
+          mkdir -p "$dmg_dir"
+          ditto "$app_path" "$staging_dir/YTLoadster.app"
+          ln -s /Applications "$staging_dir/Applications"
+
+          # Tauri's default DMG script mounts a temporary image and uses Finder/AppleScript
+          # to arrange icons. Creating a compressed image from this staging directory keeps
+          # the usual drag-to-Applications installation flow without those CI-fragile steps.
+          hdiutil create -verbose -volname "YTLoadster" -srcfolder "$staging_dir" -ov -format UDZO "$dmg_path"
+          hdiutil verify "$dmg_path"
+          ls -lh "$dmg_path"
+
+      - name: Verify final DMG contents
+        run: |
+          dmg_path="$(find src-tauri/target -type f -path '*/release/bundle/dmg/*.dmg' -print -quit)"
+          if [ -z "$dmg_path" ]; then
+            echo "DMG was not found. Available bundle output:"
+            find src-tauri/target -path '*bundle*' -print
+            exit 1
+          fi
+
+          hdiutil verify "$dmg_path"
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" -quiet || true
+            rm -rf "$mount_dir"
+          }
+          trap cleanup EXIT
+          hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir"
+
+          test -L "$mount_dir/Applications"
+          test "$(readlink "$mount_dir/Applications")" = "/Applications"
+
+          app_path="$(find "$mount_dir" -maxdepth 1 -type d -name 'YTLoadster.app' -print -quit)"
+          if [ -z "$app_path" ]; then
+            echo "YTLoadster.app was not found in the mounted DMG:"
+            find "$mount_dir" -maxdepth 2 -print
+            exit 1
+          fi
+
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          for tool in yt-dlp_macos deno ffmpeg ffprobe libmp3lame.0.dylib; do
+            tool_path="$app_path/Contents/Resources/tools/$tool"
+            test -x "$tool_path"
+            codesign --verify --strict --verbose=2 "$tool_path"
+            lipo -archs "$tool_path" | grep -w "${{ matrix.expected_architecture }}"
+          done
+          test -f "$app_path/Contents/Resources/COMPONENTS.txt"
+          test -f "$app_path/Contents/Resources/LAME_LGPL-2.0.txt"
+          "$app_path/Contents/Resources/tools/yt-dlp_macos" --version
+          "$app_path/Contents/Resources/tools/deno" --version
+          "$app_path/Contents/Resources/tools/ffmpeg" -version
+          "$app_path/Contents/Resources/tools/ffprobe" -version
+          "$app_path/Contents/Resources/tools/ffmpeg" -hide_banner -encoders | grep -q 'libmp3lame'
+          otool -L "$app_path/Contents/Resources/tools/ffmpeg" | grep -q '@loader_path/libmp3lame.0.dylib'
+          shasum -a 256 "$dmg_path"
+
+      - name: Upload DMG and component manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: YTLoadster-0.1.0-macos-${{ matrix.architecture }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/**/release/bundle/dmg/*.dmg
+            src-tauri/resources/macos/COMPONENTS.txt
