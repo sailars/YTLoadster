@@ -109,6 +109,7 @@ ffmpeg_prefix="${WORK_DIR}/ffmpeg-install"
     --prefix="$ffmpeg_prefix" \
     --disable-gpl \
     --disable-nonfree \
+    --disable-autodetect \
     --disable-debug \
     --disable-doc \
     --disable-ffplay \
@@ -180,7 +181,7 @@ License: MIT
 FFmpeg ${FFMPEG_VERSION}
 Source: ${FFMPEG_URL}
 Source SHA-256: ${FFMPEG_SHA256}
-Built with: --disable-gpl --disable-nonfree --disable-shared --enable-static --enable-libmp3lame
+Built with: --disable-gpl --disable-nonfree --disable-autodetect --disable-shared --enable-static --enable-libmp3lame
 ffmpeg SHA-256: $(sha256 "${TOOLS_DIR}/ffmpeg")
 ffprobe SHA-256: $(sha256 "${TOOLS_DIR}/ffprobe")
 License: LGPL-2.1-or-later; full text: FFMPEG_LGPL-2.1.txt
@@ -192,6 +193,30 @@ Bundled as FFmpeg's dynamic dependency for MP3 encoding.
 libmp3lame SHA-256: $(sha256 "${TOOLS_DIR}/${LAME_DYLIB_NAME}")
 License: LGPL-2.0; full text: LAME_LGPL-2.0.txt
 EOF
+
+# A distributable macOS tool may use Apple system libraries and libraries
+# bundled beside it. Any other absolute path (Homebrew, MacPorts or a runner
+# directory) would make the DMG work only on the machine that built it.
+verify_portable_dependencies() {
+  local tool_name="$1"
+  local tool_path="${TOOLS_DIR}/${tool_name}"
+  local dependency
+
+  while IFS= read -r dependency; do
+    case "$dependency" in
+      /System/Library/* | /usr/lib/* | @loader_path/*)
+        ;;
+      *)
+        echo "${tool_name} has a non-portable dependency: ${dependency}" >&2
+        exit 1
+        ;;
+    esac
+  done < <(otool -L "$tool_path" | tail -n +2 | awk '{ print $1 }')
+}
+
+verify_portable_dependencies "ffmpeg"
+verify_portable_dependencies "ffprobe"
+verify_portable_dependencies "$LAME_DYLIB_NAME"
 
 # The final application cannot access the runner's temporary build directory.
 # Remove it before exercising both executables so an absolute dependency can

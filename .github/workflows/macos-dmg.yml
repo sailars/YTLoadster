@@ -161,15 +161,24 @@ jobs:
           for tool in ffmpeg ffprobe; do
             tool_path="${tools_dir}/${tool}"
             "${tool_path}" -version
-            if otool -L "${tool_path}" | grep -Fq '/Users/runner/'; then
-              echo "${tool} still depends on the GitHub runner path" >&2
-              exit 1
-            fi
             if otool -L "${tool_path}" | grep -q 'libmp3lame' \
               && ! otool -L "${tool_path}" | awk '{ print $1 }' | grep -Fxq '@loader_path/libmp3lame.0.dylib'; then
               echo "${tool} does not refer to the bundled LAME library" >&2
               exit 1
             fi
+          done
+          for tool in ffmpeg ffprobe libmp3lame.0.dylib; do
+            tool_path="${tools_dir}/${tool}"
+            while IFS= read -r dependency; do
+              case "$dependency" in
+                /System/Library/* | /usr/lib/* | @loader_path/*)
+                  ;;
+                *)
+                  echo "${tool} has a non-portable dependency: ${dependency}" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(otool -L "$tool_path" | tail -n +2 | awk '{ print $1 }')
           done
           "${tools_dir}/ffmpeg" -hide_banner -encoders | grep -q 'libmp3lame'
           smoke_dir="$(mktemp -d)"
