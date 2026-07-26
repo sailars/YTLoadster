@@ -128,9 +128,10 @@ jobs:
 
           hdiutil verify "$dmg_path"
           mount_dir="$(mktemp -d)"
+          smoke_dir=""
           cleanup() {
             hdiutil detach "$mount_dir" -quiet || true
-            rm -rf "$mount_dir"
+            rm -rf "$mount_dir" "$smoke_dir"
           }
           trap cleanup EXIT
           hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir"
@@ -156,10 +157,24 @@ jobs:
           test -f "$app_path/Contents/Resources/LAME_LGPL-2.0.txt"
           "$app_path/Contents/Resources/tools/yt-dlp_macos" --version
           "$app_path/Contents/Resources/tools/deno" --version
-          "$app_path/Contents/Resources/tools/ffmpeg" -version
-          "$app_path/Contents/Resources/tools/ffprobe" -version
-          "$app_path/Contents/Resources/tools/ffmpeg" -hide_banner -encoders | grep -q 'libmp3lame'
-          otool -L "$app_path/Contents/Resources/tools/ffmpeg" | grep -q '@loader_path/libmp3lame.0.dylib'
+          tools_dir="$app_path/Contents/Resources/tools"
+          for tool in ffmpeg ffprobe; do
+            tool_path="${tools_dir}/${tool}"
+            "${tool_path}" -version
+            if otool -L "${tool_path}" | grep -Fq '/Users/runner/'; then
+              echo "${tool} still depends on the GitHub runner path" >&2
+              exit 1
+            fi
+            if otool -L "${tool_path}" | grep -q 'libmp3lame' \
+              && ! otool -L "${tool_path}" | awk '{ print $1 }' | grep -Fxq '@loader_path/libmp3lame.0.dylib'; then
+              echo "${tool} does not refer to the bundled LAME library" >&2
+              exit 1
+            fi
+          done
+          "${tools_dir}/ffmpeg" -hide_banner -encoders | grep -q 'libmp3lame'
+          smoke_dir="$(mktemp -d)"
+          "${tools_dir}/ffmpeg" -y -f lavfi -i 'sine=frequency=1000:sample_rate=44100:duration=0.1' -c:a libmp3lame "${smoke_dir}/audio.mp3"
+          "${tools_dir}/ffprobe" -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "${smoke_dir}/audio.mp3" | grep -x 'mp3'
           shasum -a 256 "$dmg_path"
 
       - name: Upload DMG and component manifest

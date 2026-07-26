@@ -130,12 +130,36 @@ if [[ ! -f "$LAME_DYLIB_SOURCE" ]]; then
 fi
 install -m 755 "$LAME_DYLIB_SOURCE" "${TOOLS_DIR}/${LAME_DYLIB_NAME}"
 install_name_tool -id "@loader_path/${LAME_DYLIB_NAME}" "${TOOLS_DIR}/${LAME_DYLIB_NAME}"
-lame_reference="$(otool -L "${TOOLS_DIR}/ffmpeg" | awk '/libmp3lame/ { print $1; exit }')"
-if [[ -z "$lame_reference" ]]; then
-  echo "FFmpeg was built without a libmp3lame dependency" >&2
-  exit 1
-fi
-install_name_tool -change "$lame_reference" "@loader_path/${LAME_DYLIB_NAME}" "${TOOLS_DIR}/ffmpeg"
+
+# FFmpeg's programs can retain the absolute LAME path from this temporary
+# runner. It works during CI while that path exists, but fails on the user's
+# Mac after the DMG is installed. Patch every bundled program that references
+# LAME, not only ffmpeg: audio extraction starts by invoking ffprobe as well.
+readonly BUNDLED_LAME_REFERENCE="@loader_path/${LAME_DYLIB_NAME}"
+rewrite_lame_dependency() {
+  local tool_name="$1"
+  local tool_path="${TOOLS_DIR}/${tool_name}"
+  local lame_reference
+  lame_reference="$(otool -L "$tool_path" | awk '/libmp3lame/ { print $1; exit }')"
+
+  if [[ "$tool_name" == "ffmpeg" && -z "$lame_reference" ]]; then
+    echo "FFmpeg was built without a libmp3lame dependency" >&2
+    exit 1
+  fi
+
+  if [[ -n "$lame_reference" && "$lame_reference" != "$BUNDLED_LAME_REFERENCE" ]]; then
+    install_name_tool -change "$lame_reference" "$BUNDLED_LAME_REFERENCE" "$tool_path"
+  fi
+
+  if [[ -n "$lame_reference" ]] \
+    && ! otool -L "$tool_path" | awk '{ print $1 }' | grep -Fxq "$BUNDLED_LAME_REFERENCE"; then
+    echo "${tool_name} does not refer to the bundled LAME library" >&2
+    exit 1
+  fi
+}
+
+rewrite_lame_dependency "ffmpeg"
+rewrite_lame_dependency "ffprobe"
 install -m 644 "${ffmpeg_source}/COPYING.LGPLv2.1" "${RESOURCES_DIR}/FFMPEG_LGPL-2.1.txt"
 install -m 644 "${lame_source}/COPYING" "${RESOURCES_DIR}/LAME_LGPL-2.0.txt"
 
@@ -168,5 +192,12 @@ Bundled as FFmpeg's dynamic dependency for MP3 encoding.
 libmp3lame SHA-256: $(sha256 "${TOOLS_DIR}/${LAME_DYLIB_NAME}")
 License: LGPL-2.0; full text: LAME_LGPL-2.0.txt
 EOF
+
+# The final application cannot access the runner's temporary build directory.
+# Remove it before exercising both executables so an absolute dependency can
+# never be hidden by a successful CI run.
+rm -rf "$WORK_DIR"
+"${TOOLS_DIR}/ffmpeg" -version >/dev/null
+"${TOOLS_DIR}/ffprobe" -version >/dev/null
 
 echo "Prepared macOS tools in ${TOOLS_DIR}"
