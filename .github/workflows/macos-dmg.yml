@@ -68,7 +68,8 @@ jobs:
           lipo -archs src-tauri/resources/macos/tools/ffprobe | grep -x "${{ matrix.expected_architecture }}"
           lipo -archs src-tauri/resources/macos/tools/libmp3lame.0.dylib | grep -x "${{ matrix.expected_architecture }}"
           lipo -archs src-tauri/resources/macos/tools/yt-dlp_macos | grep -Eq 'x86_64.*arm64|arm64.*x86_64'
-          src-tauri/resources/macos/tools/ffmpeg -hide_banner -encoders | grep -q 'libmp3lame'
+          src-tauri/resources/macos/tools/ffmpeg -hide_banner -encoders | grep -F 'libmp3lame' >/dev/null
+          src-tauri/resources/macos/tools/ffmpeg -hide_banner -encoders | grep -E '[[:space:]]png[[:space:]]' >/dev/null
           if ! otool -L src-tauri/resources/macos/tools/ffmpeg | grep -q '@loader_path/libmp3lame.0.dylib'; then
             echo "FFmpeg must refer to the bundled LAME library" >&2
             exit 1
@@ -180,10 +181,29 @@ jobs:
               esac
             done < <(otool -L "$tool_path" | tail -n +2 | awk '{ print $1 }')
           done
-          "${tools_dir}/ffmpeg" -hide_banner -encoders | grep -q 'libmp3lame'
+          "${tools_dir}/ffmpeg" -hide_banner -encoders | grep -F 'libmp3lame' >/dev/null
+          "${tools_dir}/ffmpeg" -hide_banner -encoders | grep -E '[[:space:]]png[[:space:]]' >/dev/null
           smoke_dir="$(mktemp -d)"
           "${tools_dir}/ffmpeg" -y -f lavfi -i 'sine=frequency=1000:sample_rate=44100:duration=0.1' -c:a libmp3lame "${smoke_dir}/audio.mp3"
           "${tools_dir}/ffprobe" -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "${smoke_dir}/audio.mp3" | grep -x 'mp3'
+          "${tools_dir}/ffmpeg" -y -f lavfi -i 'color=c=blue:s=64x64' -frames:v 1 "${smoke_dir}/cover.png"
+          "${tools_dir}/ffmpeg" -y \
+            -i "${smoke_dir}/audio.mp3" \
+            -i "${smoke_dir}/cover.png" \
+            -c copy \
+            -map 0:0 \
+            -map 1:0 \
+            -write_id3v1 1 \
+            -id3v2_version 3 \
+            -metadata:s:v 'title=Album cover' \
+            -metadata:s:v 'comment=Cover (front)' \
+            "${smoke_dir}/audio-with-cover.mp3"
+          "${tools_dir}/ffprobe" \
+            -v error \
+            -select_streams v:0 \
+            -show_entries stream_disposition=attached_pic \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "${smoke_dir}/audio-with-cover.mp3" | grep -x '1'
           shasum -a 256 "$dmg_path"
 
       - name: Upload DMG and component manifest

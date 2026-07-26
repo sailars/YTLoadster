@@ -115,6 +115,7 @@ ffmpeg_prefix="${WORK_DIR}/ffmpeg-install"
     --disable-ffplay \
     --disable-shared \
     --enable-static \
+    --enable-zlib \
     --enable-libmp3lame \
     --extra-cflags="-I${lame_prefix}/include" \
     --extra-ldflags="-L${lame_prefix}/lib"
@@ -181,7 +182,7 @@ License: MIT
 FFmpeg ${FFMPEG_VERSION}
 Source: ${FFMPEG_URL}
 Source SHA-256: ${FFMPEG_SHA256}
-Built with: --disable-gpl --disable-nonfree --disable-autodetect --disable-shared --enable-static --enable-libmp3lame
+Built with: --disable-gpl --disable-nonfree --disable-autodetect --disable-shared --enable-static --enable-zlib --enable-libmp3lame
 ffmpeg SHA-256: $(sha256 "${TOOLS_DIR}/ffmpeg")
 ffprobe SHA-256: $(sha256 "${TOOLS_DIR}/ffprobe")
 License: LGPL-2.1-or-later; full text: FFMPEG_LGPL-2.1.txt
