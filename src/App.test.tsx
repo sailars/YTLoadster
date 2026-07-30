@@ -677,8 +677,20 @@ describe("App", () => {
 
     await screen.findByText("Заданий пока нет");
 
-    expect(screen.getByRole("button", { name: /отменить все/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /очистить очередь/i })).toBeDisabled();
+    const cancelAll = screen.getByRole("button", { name: /отменить все/i });
+    const clearQueue = screen.getByRole("button", { name: /очистить очередь/i });
+    const cancelAllTooltip = document.getElementById(cancelAll.getAttribute("aria-describedby")!);
+    const clearQueueTooltip = document.getElementById(clearQueue.getAttribute("aria-describedby")!);
+
+    expect(cancelAll).toBeDisabled();
+    expect(clearQueue).toBeDisabled();
+    expect(cancelAllTooltip).toHaveTextContent(
+      "Окончательно отменяет все ожидающие, загружающиеся и приостановленные задания.",
+    );
+    expect(cancelAllTooltip).not.toHaveTextContent("Для отмены одного задания");
+    expect(clearQueueTooltip).toHaveTextContent(
+      "Удаляет из очереди только завершённые, неудачные и отменённые объекты. Активные загрузки не затрагиваются.",
+    );
   });
 
   it("keeps cancel all disabled for a single cancellable job", async () => {
@@ -746,6 +758,51 @@ describe("App", () => {
     expect(screen.getByRole("listbox", { name: "Профиль скачивания" })).toBeInTheDocument();
     expect(screen.getByText("По качеству")).toBeInTheDocument();
     expect(screen.queryByLabelText("Справка о быстром выборе")).not.toBeInTheDocument();
+  });
+
+  it("submits the current phone profile identifier accepted by the backend", async () => {
+    vi.mocked(api.probeUrl).mockResolvedValueOnce({
+      title: "Phone Profile Video",
+      uploader: "Channel",
+      duration: 120,
+      videoFormats: [
+        {
+          formatId: "v720",
+          qualityLabel: "720p 30fps MP4 H.264",
+          kind: "video",
+          ext: "mp4",
+          codec: "avc1.4d401f",
+          height: 720,
+          fps: 30,
+        },
+      ],
+      audioFormats: [
+        {
+          formatId: "a1",
+          qualityLabel: "128kbps M4A AAC",
+          kind: "audio",
+          ext: "m4a",
+          codec: "mp4a.40.2",
+        },
+      ],
+    });
+    render(<App />);
+
+    await userEvent.type(
+      screen.getByLabelText(/ссылка на видео/i),
+      "https://youtube.com/watch?v=phone-profile",
+    );
+    await screen.findByText("Phone Profile Video");
+    await selectParameter("Профиль скачивания", "phone");
+    await userEvent.click(screen.getByRole("button", { name: /скачать видео/i }));
+
+    expect(api.enqueueDownload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        videoProfile: "phone",
+        formatId: "v720",
+        audioFormatId: "a1",
+      }),
+    );
   });
 
   it("shows detailed video choices without a long duplicate quality list", async () => {
@@ -1824,7 +1881,7 @@ describe("App", () => {
     render(<App />);
 
     await screen.findByText("Running Video");
-    await userEvent.click(screen.getByRole("button", { name: /пауза всех/i }));
+    await userEvent.click(screen.getByRole("button", { name: /приостановить всё/i }));
 
     expect(api.pauseAllJobs).toHaveBeenCalled();
     expect(screen.getAllByText("Пауза")).toHaveLength(3);
@@ -1859,7 +1916,7 @@ describe("App", () => {
 
     await screen.findByText("Running Video");
 
-    expect(screen.getByRole("button", { name: /пауза всех/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /приостановить всё/i })).toBeDisabled();
   });
 
   it("always shows pause all and resumes only paused downloads", async () => {

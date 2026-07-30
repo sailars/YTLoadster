@@ -68,19 +68,24 @@ export function Queue({
             {pauseAllIsResume ? <PlayIcon /> : <PauseIcon />}
             <span>{pauseAllIsResume ? t("queue.resumeAll") : t("queue.pauseAll")}</span>
           </button>
-          <button type="button" className="secondary queue-action-button clear-queue-button" onClick={onClear} disabled={clearableJobs === 0}>
-            <TrashIcon />
-            <span>{t("queue.clear")}</span>
-          </button>
-            <button
-              type="button"
-              className="secondary queue-action-button danger-queue-button"
-              onClick={onCancelAll}
+          <QueueBulkAction
+            id="clear-queue-tooltip"
+            label={t("queue.clear")}
+            tooltip={t("queue.clearTooltip")}
+            className="clear-queue-button"
+            onClick={onClear}
+            disabled={clearableJobs === 0}
+            icon="trash"
+          />
+          <QueueBulkAction
+            id="cancel-all-tooltip"
+            label={t("queue.cancelAll")}
+            tooltip={t("queue.cancelAllTooltip")}
+            className="danger-queue-button"
+            onClick={onCancelAll}
             disabled={cancellableJobs < 2}
-            >
-              <CloseIcon />
-              <span>{t("queue.cancelAll")}</span>
-            </button>
+            icon="close"
+          />
         </div>
       </div>
       {jobs.length === 0 ? (
@@ -199,6 +204,47 @@ export function Queue({
         </ol>
       )}
     </section>
+  );
+}
+
+function QueueBulkAction({
+  id,
+  label,
+  tooltip,
+  className,
+  onClick,
+  disabled,
+  icon,
+}: {
+  id: string;
+  label: string;
+  tooltip: string;
+  className: string;
+  onClick: () => void;
+  disabled: boolean;
+  icon: "trash" | "close";
+}) {
+  return (
+    <span
+      className="queue-action-tooltip"
+      tabIndex={disabled ? 0 : undefined}
+      aria-label={disabled ? label : undefined}
+      aria-describedby={disabled ? id : undefined}
+    >
+      <button
+        type="button"
+        className={`secondary queue-action-button ${className}`}
+        onClick={onClick}
+        disabled={disabled}
+        aria-describedby={id}
+      >
+        {icon === "trash" ? <TrashIcon /> : <CloseIcon />}
+        <span>{label}</span>
+      </button>
+      <span id={id} className="queue-action-tooltip-content" role="tooltip">
+        {tooltip}
+      </span>
+    </span>
   );
 }
 

@@ -1,4 +1,15 @@
 {
+  "app": {
+    "windows": [
+      {
+        "title": "YTLoadster",
+        "width": 1232,
+        "height": 680,
+        "minWidth": 820,
+        "minHeight": 560
+      }
+    ]
+  },
   "bundle": {
     "targets": ["nsis"]
   }

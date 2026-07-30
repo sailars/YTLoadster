@@ -1,6 +1,6 @@
 # Сторонние компоненты
 
-Portable-версия YTLoadster включает следующие сторонние исполняемые компоненты.
+Release-сборки YTLoadster включают следующие сторонние исполняемые компоненты.
 
 ## yt-dlp
 
@@ -25,8 +25,10 @@ Portable-версия YTLoadster включает следующие сторо�
 
 ## macOS: FFmpeg, FFprobe и LAME
 
-- macOS DMG не использует локальные или Homebrew-бинарники пользователя. GitHub Actions скачивает исходники FFmpeg и LAME по закреплённым URL с проверкой SHA-256, собирает `ffmpeg`/`ffprobe` с `--enable-libmp3lame` и кладёт их вместе с динамической `libmp3lame.0.dylib` в `YTLoadster.app/Contents/Resources/tools/`.
+- macOS DMG не использует локальные или Homebrew-бинарники пользователя. GitHub Actions скачивает исходники FFmpeg и LAME по закреплённым URL с проверкой SHA-256, собирает `ffmpeg`/`ffprobe` с `--disable-autodetect --enable-zlib --enable-libmp3lame` и кладёт их вместе с динамической `libmp3lame.0.dylib` в `YTLoadster.app/Contents/Resources/tools/`.
 - `libmp3lame` нужен именно для конвертации в MP3: это кодер, который вызывает `yt-dlp`.
+- `zlib` включён явно для PNG-кодировщика FFmpeg, который нужен `yt-dlp` при преобразовании и встраивании обложек в аудиофайлы. Используется системная библиотека macOS.
 - FFmpeg собирается в LGPL-конфигурации (`--disable-gpl --disable-nonfree`); текст его лицензии находится в DMG как `FFMPEG_LGPL-2.1.txt`.
 - LAME распространяется на условиях LGPL; текст лицензии находится в DMG как `LAME_LGPL-2.0.txt`.
 - Точные версии, URL исходников, SHA-256 исходников и собранных файлов фиксируются в `COMPONENTS.txt` внутри соответствующего DMG.
+- Workflow отклоняет FFmpeg/FFprobe с абсолютными зависимостями Homebrew или runner и перед публикацией проверяет реальную конвертацию в MP3 и встраивание PNG-обложки.
