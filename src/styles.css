@@ -549,6 +549,47 @@ button:disabled {
   fill: currentColor;
 }
 
+.queue-action-tooltip {
+  position: relative;
+  display: inline-flex;
+  outline: none;
+}
+
+.queue-action-tooltip-content {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 7px);
+  right: 0;
+  width: max-content;
+  max-width: min(330px, calc(100vw - 48px));
+  visibility: hidden;
+  border-radius: 5px;
+  padding: 8px 10px;
+  color: #ffffff;
+  background: #303532;
+  box-shadow: 0 8px 22px rgba(20, 24, 21, 0.18);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+}
+
+.section-heading .queue-action-tooltip-content {
+  color: #ffffff;
+  font-size: 12px;
+}
+
+.queue-action-tooltip:hover .queue-action-tooltip-content,
+.queue-action-tooltip:focus-within .queue-action-tooltip-content {
+  visibility: visible;
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .clear-queue-button svg {
   color: #e5485d;
 }
@@ -3961,7 +4002,8 @@ button.secondary.theme-button:active {
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.34);
 }
 
-:root[data-theme="dark"] .queue-title-tooltip-content {
+:root[data-theme="dark"] .queue-title-tooltip-content,
+:root[data-theme="dark"] .section-heading .queue-action-tooltip-content {
   border: 1px solid #40535f;
   color: #e3ebf0;
   background: #22313a;

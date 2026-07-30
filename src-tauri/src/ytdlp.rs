@@ -74,9 +74,10 @@ pub enum VideoDownloadProfile {
     Mp4_480,
     Mp4_360,
     Universal,
-    PhoneTablet,
-    IphoneIpad,
-    Android,
+    #[serde(alias = "phone-tablet")]
+    Phone,
+    #[serde(alias = "iphone-ipad", alias = "android")]
+    Tablet,
     SmartTv,
     Legacy,
     Custom,
@@ -1028,6 +1029,51 @@ mod tests {
     use super::*;
     use crate::tools::{ToolInventory, ToolState, ToolStatus};
     use std::path::PathBuf;
+
+    #[test]
+    fn deserializes_every_current_frontend_video_profile() {
+        let cases = [
+            ("best", VideoDownloadProfile::Best),
+            ("mp4-1080", VideoDownloadProfile::Mp4_1080),
+            ("mp4-720", VideoDownloadProfile::Mp4_720),
+            ("mp4-480", VideoDownloadProfile::Mp4_480),
+            ("mp4-360", VideoDownloadProfile::Mp4_360),
+            ("universal", VideoDownloadProfile::Universal),
+            ("phone", VideoDownloadProfile::Phone),
+            ("tablet", VideoDownloadProfile::Tablet),
+            ("smart-tv", VideoDownloadProfile::SmartTv),
+            ("legacy", VideoDownloadProfile::Legacy),
+            ("custom", VideoDownloadProfile::Custom),
+        ];
+
+        for (name, expected) in cases {
+            let json = serde_json::to_string(name).unwrap();
+            let profile: VideoDownloadProfile = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(profile, expected, "profile {name}");
+            assert_eq!(serde_json::to_string(&profile).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn migrates_legacy_video_profile_names_to_current_values() {
+        let cases = [
+            ("phone-tablet", VideoDownloadProfile::Phone, "phone"),
+            ("iphone-ipad", VideoDownloadProfile::Tablet, "tablet"),
+            ("android", VideoDownloadProfile::Tablet, "tablet"),
+        ];
+
+        for (legacy_name, expected, current_name) in cases {
+            let profile: VideoDownloadProfile =
+                serde_json::from_str(&serde_json::to_string(legacy_name).unwrap()).unwrap();
+
+            assert_eq!(profile, expected, "legacy profile {legacy_name}");
+            assert_eq!(
+                serde_json::to_string(&profile).unwrap(),
+                serde_json::to_string(current_name).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn parses_available_video_and_audio_qualities() {
