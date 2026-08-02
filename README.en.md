@@ -1,5 +1,7 @@
 # YTLoadster
 
+[Русский](README.md)
+
 YTLoadster is a desktop application for downloading video, audio, and subtitles from supported websites.
 
 > This is the first public `0.1.0` release for Windows and macOS. Use the application in accordance with website terms, applicable laws, and copyright holders' rights.
@@ -21,12 +23,31 @@ YTLoadster is a desktop application for downloading video, audio, and subtitles 
 - **Windows 10/11 x64** - distributed as a portable archive.
 - **macOS 12+** - distributed as separate DMG files for Apple Silicon (`arm64`) and Intel (`x64`).
 
-### First-launch warnings
+## Installation
 
-Release `0.1.0` does not yet have commercial Windows code signing or Apple notarization:
+### Windows
 
-- **Windows SmartScreen:** if you obtained the archive from the official repository's Releases page, click "More info" in the warning dialog, verify that the application name is `YTLoadster`, and select "Run anyway."
-- **macOS Gatekeeper:** move the application from the DMG to `Applications`. If macOS blocks the first launch, open System Settings -> Privacy & Security, find the message about YTLoadster, and click "Open Anyway."
+Extract the entire ZIP archive and run `YTLoadster.exe`. Do not move the EXE away from the `tools` directory.
+
+This build is not digitally signed yet. If the archive came from the Releases page of the official repository, select "More info" in the SmartScreen dialog, verify the `YTLoadster` application name, and choose "Run anyway." Do not run a copy obtained from another source.
+
+### macOS
+
+Open the DMG and drag YTLoadster to `Applications`.
+
+This build uses an ad-hoc signature and is not notarized by Apple yet. If Gatekeeper blocks the first launch, open System Settings -> Privacy & Security, find the YTLoadster message, and choose "Open Anyway."
+
+If that option is unavailable, remove the quarantine attribute in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/YTLoadster.app"
+```
+
+After running the command, open YTLoadster again from `Applications`.
+
+## Important
+
+Use the application only for content you are legally allowed to download. You are responsible for complying with website terms, copyright law, and the laws of your jurisdiction.
 
 ## Running from source
 
