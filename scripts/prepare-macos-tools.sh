@@ -83,10 +83,15 @@ download_and_verify "$LAME_URL" "$LAME_SHA256" "$lame_archive"
 tar -xzf "$lame_archive" -C "$WORK_DIR"
 lame_source="${WORK_DIR}/lame-${LAME_VERSION}"
 lame_prefix="${WORK_DIR}/lame-install"
-# LAME 3.100 ships a stale macOS export-list entry for `lame_init_old`.
-# The function is no longer part of the library, so current Apple linkers
-# reject the dynamic library until the obsolete export is removed.
-sed -i.bak '/^lame_init_old$/d' "${lame_source}/include/libmp3lame.sym"
+# LAME 3.100 keeps obsolete and decoder-only APIs in its export list even when
+# the decoder is disabled. Current Apple linkers reject a dylib whose export
+# list names symbols that are not present in the compiled objects.
+readonly LAME_EXPORT_LIST="${lame_source}/include/libmp3lame.sym"
+sed -E -i.bak '/^(lame_init_old|hip_|lame_decode)/d' "$LAME_EXPORT_LIST"
+if grep -Eq '^(lame_init_old|hip_|lame_decode)' "$LAME_EXPORT_LIST"; then
+  echo "LAME export list still contains unavailable decoder symbols" >&2
+  exit 1
+fi
 (
   cd "$lame_source"
   ./configure \
@@ -129,6 +134,15 @@ readonly LAME_DYLIB_SOURCE="${lame_prefix}/lib/libmp3lame.0.dylib"
 readonly LAME_DYLIB_NAME="libmp3lame.0.dylib"
 if [[ ! -f "$LAME_DYLIB_SOURCE" ]]; then
   echo "LAME dynamic library was not produced" >&2
+  exit 1
+fi
+readonly LAME_EXPORTED_SYMBOLS="$(nm -gU "$LAME_DYLIB_SOURCE" | awk '{ print $NF }')"
+if ! grep -Fxq '_lame_encode_buffer' <<< "$LAME_EXPORTED_SYMBOLS"; then
+  echo "LAME dynamic library does not export the MP3 encoder API" >&2
+  exit 1
+fi
+if grep -Eq '^_(hip_|lame_decode)' <<< "$LAME_EXPORTED_SYMBOLS"; then
+  echo "LAME dynamic library unexpectedly exports decoder APIs" >&2
   exit 1
 fi
 install -m 755 "$LAME_DYLIB_SOURCE" "${TOOLS_DIR}/${LAME_DYLIB_NAME}"
