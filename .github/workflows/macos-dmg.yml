@@ -12,6 +12,9 @@ on:
       - 'src/**'
       - 'package.json'
       - 'package-lock.json'
+      - 'LICENSE'
+      - 'THIRD_PARTY_NOTICES.md'
+      - 'licenses/**'
 
 permissions:
   contents: read
@@ -42,6 +45,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      - name: Read release version
+        id: release
+        run: |
+          echo "version=$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -101,7 +109,7 @@ jobs:
 
           staging_dir="$(mktemp -d)"
           dmg_dir="src-tauri/target/release/bundle/dmg"
-          dmg_path="$dmg_dir/YTLoadster_0.1.0_${{ matrix.architecture }}.dmg"
+          dmg_path="$dmg_dir/YTLoadster-${{ steps.release.outputs.version }}-macos-${{ matrix.architecture }}.dmg"
           cleanup() {
             rm -rf "$staging_dir"
           }
@@ -155,6 +163,14 @@ jobs:
             lipo -archs "$tool_path" | grep -w "${{ matrix.expected_architecture }}"
           done
           test -f "$app_path/Contents/Resources/COMPONENTS.txt"
+          test -f "$app_path/Contents/Resources/LICENSE.txt"
+          test -f "$app_path/Contents/Resources/THIRD_PARTY_NOTICES.md"
+          test -f "$app_path/Contents/Resources/DEPENDENCIES.md"
+          test -f "$app_path/Contents/Resources/FRONTEND_LICENSES.txt"
+          test -f "$app_path/Contents/Resources/DEPENDENCY_LICENSES.html"
+          test -f "$app_path/Contents/Resources/DENO_MIT.txt"
+          test -f "$app_path/Contents/Resources/YTDLP_GPL-3.0.txt"
+          test -f "$app_path/Contents/Resources/FFMPEG_LGPL-2.1.txt"
           test -f "$app_path/Contents/Resources/LAME_LGPL-2.0.txt"
           "$app_path/Contents/Resources/tools/yt-dlp_macos" --version
           "$app_path/Contents/Resources/tools/deno" --version
@@ -209,7 +225,7 @@ jobs:
       - name: Upload DMG and component manifest
         uses: actions/upload-artifact@v4
         with:
-          name: YTLoadster-0.1.0-macos-${{ matrix.architecture }}
+          name: YTLoadster-${{ steps.release.outputs.version }}-macos-${{ matrix.architecture }}
           if-no-files-found: error
           path: |
             src-tauri/target/**/release/bundle/dmg/*.dmg

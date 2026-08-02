@@ -92,7 +92,8 @@ sed -i.bak '/^lame_init_old$/d' "${lame_source}/include/libmp3lame.sym"
   ./configure \
     --prefix="$lame_prefix" \
     --enable-shared \
-    --disable-static
+    --disable-static \
+    --disable-decoder
   make -j"$(sysctl -n hw.ncpu)"
   make install
 )
@@ -164,6 +165,13 @@ rewrite_lame_dependency "ffmpeg"
 rewrite_lame_dependency "ffprobe"
 install -m 644 "${ffmpeg_source}/COPYING.LGPLv2.1" "${RESOURCES_DIR}/FFMPEG_LGPL-2.1.txt"
 install -m 644 "${lame_source}/COPYING" "${RESOURCES_DIR}/LAME_LGPL-2.0.txt"
+install -m 644 "${PROJECT_ROOT}/LICENSE" "${RESOURCES_DIR}/LICENSE.txt"
+install -m 644 "${PROJECT_ROOT}/THIRD_PARTY_NOTICES.md" "${RESOURCES_DIR}/THIRD_PARTY_NOTICES.md"
+install -m 644 "${PROJECT_ROOT}/licenses/DEPENDENCIES.md" "${RESOURCES_DIR}/DEPENDENCIES.md"
+install -m 644 "${PROJECT_ROOT}/licenses/FRONTEND_LICENSES.txt" "${RESOURCES_DIR}/FRONTEND_LICENSES.txt"
+install -m 644 "${PROJECT_ROOT}/licenses/DEPENDENCY_LICENSES.html" "${RESOURCES_DIR}/DEPENDENCY_LICENSES.html"
+install -m 644 "${PROJECT_ROOT}/licenses/DENO_MIT.txt" "${RESOURCES_DIR}/DENO_MIT.txt"
+install -m 644 "${PROJECT_ROOT}/licenses/YTDLP_GPL-3.0.txt" "${RESOURCES_DIR}/YTDLP_GPL-3.0.txt"
 
 cat > "${RESOURCES_DIR}/COMPONENTS.txt" <<EOF
 YTLoadster macOS component manifest
@@ -172,7 +180,8 @@ Architecture: ${BUILD_ARCH}
 yt-dlp ${YTDLP_VERSION}
 Source: ${YTDLP_URL}
 SHA-256: $(sha256 "${TOOLS_DIR}/yt-dlp_macos")
-License: The Unlicense; bundled third-party licenses are included by yt-dlp.
+License: GPL-3.0-or-later combined standalone executable; full text: YTDLP_GPL-3.0.txt.
+The yt-dlp source itself is released under The Unlicense; bundled third-party notices are included in the executable.
 
 Deno ${DENO_VERSION}
 Source: https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/${deno_asset}
@@ -190,7 +199,8 @@ License: LGPL-2.1-or-later; full text: FFMPEG_LGPL-2.1.txt
 LAME ${LAME_VERSION}
 Source: ${LAME_URL}
 Source SHA-256: ${LAME_SHA256}
-Bundled as FFmpeg's dynamic dependency for MP3 encoding.
+Built with: --enable-shared --disable-static --disable-decoder
+Bundled as FFmpeg's dynamic dependency for MP3 encoding; GPL mpglib decoder code is disabled.
 libmp3lame SHA-256: $(sha256 "${TOOLS_DIR}/${LAME_DYLIB_NAME}")
 License: LGPL-2.0; full text: LAME_LGPL-2.0.txt
 EOF
