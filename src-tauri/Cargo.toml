@@ -1,7 +1,7 @@
 [package]
 name = "ytloadster"
 version = "0.1.0"
-description = "Windows-first video and audio downloader powered by yt-dlp"
+description = "YouTube video, audio, and subtitle downloader for Windows and macOS"
 authors = ["YTLoadster"]
 license = "MIT"
 publish = false

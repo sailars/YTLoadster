@@ -2,14 +2,16 @@
 
 [Русский](README.md)
 
-YTLoadster is a desktop application for downloading video, audio, and subtitles from supported websites.
+YTLoadster is a desktop application for downloading video, audio, and subtitles from YouTube.
 
 > This is the first public `0.1.0` release for Windows and macOS. Use the application in accordance with website terms, applicable laws, and copyright holders' rights.
 
+<img width="1232" height="710" alt="YTLoadster main window" src="https://github.com/user-attachments/assets/55b230c8-b4d4-4181-a1e4-0e7f889e3589" />
+
 ## Features
 
-- Automatic link analysis and selection of available quality options.
-- Video, audio, and subtitle downloads.
+- Automatic analysis of YouTube links and selection of available quality options.
+- Video, audio, and subtitle downloads from YouTube.
 - Ready-made video profiles for phones, tablets, Smart TVs, and compatible MP4 playback.
 - Manual selection of resolution, FPS, container, and codec.
 - Pause, resume, and cancel downloads.
