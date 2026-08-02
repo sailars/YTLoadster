@@ -75,7 +75,6 @@ if (-not (Test-Path -LiteralPath $applicationExe -PathType Leaf)) {
 $portableToolsDir = Join-Path $stagingDir "tools\windows\x64"
 New-Item -ItemType Directory -Path $portableToolsDir -Force | Out-Null
 Copy-Item -LiteralPath $applicationExe -Destination (Join-Path $stagingDir "YTLoadster.exe")
-Copy-Item -LiteralPath (Join-Path $projectRoot "packaging\PORTABLE_README.txt") -Destination (Join-Path $stagingDir "README.txt")
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $stagingDir "LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD_PARTY_NOTICES.md") -Destination (Join-Path $stagingDir "THIRD_PARTY_NOTICES.md")
 Copy-Item -LiteralPath (Join-Path $projectRoot "licenses\DEPENDENCIES.md") -Destination (Join-Path $stagingDir "DEPENDENCIES.md")
