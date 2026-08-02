@@ -1,34 +1,48 @@
 # Сторонние компоненты
 
-Release-сборки YTLoadster включают следующие сторонние исполняемые компоненты.
+Собственный код YTLoadster распространяется по MIT License. Release-пакеты
+также содержат самостоятельные сторонние исполняемые файлы и библиотеки,
+которые сохраняют собственные лицензии. MIT License проекта на них не
+распространяется.
 
 ## yt-dlp
 
 - Проект: https://github.com/yt-dlp/yt-dlp
-- Исходный код основного проекта: The Unlicense.
-- Официальный standalone-файл `yt-dlp.exe` также содержит Python, PyInstaller и сторонние пакеты. Совокупный Windows executable распространяется по GNU General Public License, version 3 or later; дополнительные уведомления встроены в executable.
+- Исходный код самого yt-dlp: The Unlicense.
+- Официальные PyInstaller standalone-файлы для Windows и macOS содержат Python и сторонние пакеты. Совокупный executable распространяется по GPL-3.0-or-later.
+- Дополнительные уведомления встроены в официальный executable. Полный текст GPL v3 также включается в release-пакет как `YTDLP_GPL-3.0.txt`.
+- Версия и ссылка на соответствующий официальный релиз фиксируются в `COMPONENTS.txt`.
 
 ## Deno
 
 - Проект: https://github.com/denoland/deno
-- Лицензия: MIT License.
-- Deno используется как JavaScript runtime для современного механизма извлечения данных YouTube.
+- Лицензия: MIT License; полный текст включается как `DENO_MIT.txt`.
 
-## FFmpeg и FFprobe
+## Windows: FFmpeg и FFprobe
 
 - Проект: https://ffmpeg.org/
 - Сборка: BtbN FFmpeg Builds, Windows x64 shared LGPL build — https://github.com/BtbN/FFmpeg-Builds
-- Лицензия выбранной сборки: GNU Lesser General Public License, version 3 or later.
+- Выбранная сборка не использует `--enable-gpl` или `--enable-nonfree` и распространяется по LGPL-3.0-or-later.
 - В portable входят `ffmpeg.exe`, `ffprobe.exe` и необходимые динамические библиотеки; `ffplay.exe` не включается.
 
-Текст LGPL v3 находится в файле `LGPL-3.0.txt` рядом с этим документом. Версии и SHA-256 включённых исполняемых файлов записаны в `COMPONENTS.txt`. Исходный код и сведения о сборке доступны по ссылкам выше.
+Текст LGPL v3 находится в файле `FFMPEG_LGPL-3.0.txt`. Версии, исходный код и сведения о сборке указаны в `COMPONENTS.txt`.
 
 ## macOS: FFmpeg, FFprobe и LAME
 
-- macOS DMG не использует локальные или Homebrew-бинарники пользователя. GitHub Actions скачивает исходники FFmpeg и LAME по закреплённым URL с проверкой SHA-256, собирает `ffmpeg`/`ffprobe` с `--disable-autodetect --enable-zlib --enable-libmp3lame` и кладёт их вместе с динамической `libmp3lame.0.dylib` в `YTLoadster.app/Contents/Resources/tools/`.
-- `libmp3lame` нужен именно для конвертации в MP3: это кодер, который вызывает `yt-dlp`.
-- `zlib` включён явно для PNG-кодировщика FFmpeg, который нужен `yt-dlp` при преобразовании и встраивании обложек в аудиофайлы. Используется системная библиотека macOS.
-- FFmpeg собирается в LGPL-конфигурации (`--disable-gpl --disable-nonfree`); текст его лицензии находится в DMG как `FFMPEG_LGPL-2.1.txt`.
-- LAME распространяется на условиях LGPL; текст лицензии находится в DMG как `LAME_LGPL-2.0.txt`.
-- Точные версии, URL исходников, SHA-256 исходников и собранных файлов фиксируются в `COMPONENTS.txt` внутри соответствующего DMG.
-- Workflow отклоняет FFmpeg/FFprobe с абсолютными зависимостями Homebrew или runner и перед публикацией проверяет реальную конвертацию в MP3 и встраивание PNG-обложки.
+- macOS-сборка включает FFmpeg, FFprobe и LAME.
+- FFmpeg и FFprobe распространяются по LGPL-2.1-or-later.
+- LAME распространяется по LGPL-2.0.
+- Полные тексты лицензий входят в приложение.
+- Версии компонентов и ссылки на исходный код указаны в `COMPONENTS.txt`.
+
+## Tauri, React и зависимости
+
+Приложение использует Tauri, React и сторонние зависимости,
+распространяемые по совместимым открытым лицензиям.
+
+Перечень компонентов, правообладателей и применимые тексты лицензий
+находятся в `DEPENDENCIES.md`, `FRONTEND_LICENSES.txt` и
+`DEPENDENCY_LICENSES.html`.
+
+Названия проектов и товарные знаки принадлежат их владельцам. Этот документ
+носит информационный характер и не изменяет условий исходных лицензий.

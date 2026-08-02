@@ -8,6 +8,13 @@
       "resources/macos/tools/ffprobe": "tools/ffprobe",
       "resources/macos/tools/libmp3lame.0.dylib": "tools/libmp3lame.0.dylib",
       "resources/macos/COMPONENTS.txt": "COMPONENTS.txt",
+      "resources/macos/LICENSE.txt": "LICENSE.txt",
+      "resources/macos/THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "resources/macos/DEPENDENCIES.md": "DEPENDENCIES.md",
+      "resources/macos/FRONTEND_LICENSES.txt": "FRONTEND_LICENSES.txt",
+      "resources/macos/DEPENDENCY_LICENSES.html": "DEPENDENCY_LICENSES.html",
+      "resources/macos/DENO_MIT.txt": "DENO_MIT.txt",
+      "resources/macos/YTDLP_GPL-3.0.txt": "YTDLP_GPL-3.0.txt",
       "resources/macos/FFMPEG_LGPL-2.1.txt": "FFMPEG_LGPL-2.1.txt",
       "resources/macos/LAME_LGPL-2.0.txt": "LAME_LGPL-2.0.txt"
     },

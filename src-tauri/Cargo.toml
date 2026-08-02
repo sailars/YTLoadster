@@ -3,6 +3,8 @@ name = "ytloadster"
 version = "0.1.0"
 description = "Windows-first video and audio downloader powered by yt-dlp"
 authors = ["YTLoadster"]
+license = "MIT"
+publish = false
 edition = "2021"
 
 [lib]

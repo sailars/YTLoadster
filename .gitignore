@@ -23,7 +23,15 @@ yt-dlp_macos
 # Временные macOS-инструменты и лицензионные файлы создаются только в CI.
 src-tauri/resources/macos/tools/
 src-tauri/resources/macos/COMPONENTS.txt
+src-tauri/resources/macos/LICENSE.txt
+src-tauri/resources/macos/THIRD_PARTY_NOTICES.md
+src-tauri/resources/macos/DEPENDENCIES.md
+src-tauri/resources/macos/FRONTEND_LICENSES.txt
+src-tauri/resources/macos/DEPENDENCY_LICENSES.html
+src-tauri/resources/macos/DENO_MIT.txt
+src-tauri/resources/macos/YTDLP_GPL-3.0.txt
 src-tauri/resources/macos/FFMPEG_LGPL-2.1.txt
+src-tauri/resources/macos/LAME_LGPL-2.0.txt
 
 # Локальные референсы, загрузки и рабочие материалы вне репозитория.
 /1.png

@@ -1,0 +1,10 @@
+[advisories]
+# quick-xml 0.39.4 is reachable only through wayland-scanner in the Linux
+# clipboard build graph. It is absent from all three published targets:
+# x86_64-pc-windows-msvc, aarch64-apple-darwin, and x86_64-apple-darwin.
+# wayland-scanner 0.31.10 has no compatible upstream release using a fixed
+# quick-xml version yet. Remove these exceptions when that dependency updates.
+ignore = [
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
