@@ -92,7 +92,9 @@ describe("ParameterSelect", () => {
     await userEvent.click(screen.getByRole("combobox", { name: "Разрешение" }));
     expect(screen.getByText("По качеству")).toBeInTheDocument();
     expect(screen.getAllByText("Автоматический выбор")).toHaveLength(2);
+    const bestOption = screen.getByRole("option", { name: /Лучшее качество/i });
     expect(screen.getByRole("option", { name: /Smart TV/i })).toHaveAttribute("title", "Нет AAC-аудио");
+    expect(bestOption.querySelector("small")).toHaveAttribute("title", "Автоматический выбор");
   });
 
   it("anchors the opened menu to its document position while the page scrolls", async () => {

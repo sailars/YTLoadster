@@ -7,6 +7,7 @@ import {
   formatFps,
   formatHeight,
   isQuickPresetAvailable,
+  predictFinalVideoContainer,
   selectClosestFormat,
   selectQuickPresetFormat,
   videoFilterOptions,
@@ -67,6 +68,22 @@ describe("videoFormats", () => {
     expect(formatFps(inferred)).toBe("48fps");
     expect(formatExt(inferred)).toBe("webm");
     expect(formatCodec(inferred)).toBe("VP9");
+  });
+
+  it("reads AAC and Opus audio codecs from technical labels", () => {
+    expect(formatCodec({ formatId: "140", qualityLabel: "128kbps m4a", kind: "audio" })).toBe("AAC");
+    expect(formatCodec({ formatId: "251", qualityLabel: "160kbps webm Opus", kind: "audio" })).toBe("Opus");
+  });
+
+  it("predicts MP4 WebM and MKV from the selected video and audio streams", () => {
+    const mp4Video: FormatOption = { formatId: "137", qualityLabel: "988p MP4 H.264", kind: "video", ext: "mp4", codec: "avc1.640028" };
+    const webmVideo: FormatOption = { formatId: "271", qualityLabel: "870p WebM VP9", kind: "video", ext: "webm", codec: "vp9" };
+    const aacAudio: FormatOption = { formatId: "140", qualityLabel: "128kbps M4A AAC", kind: "audio", ext: "m4a", codec: "mp4a.40.2" };
+    const opusAudio: FormatOption = { formatId: "251", qualityLabel: "160kbps WebM Opus", kind: "audio", ext: "webm", codec: "opus" };
+
+    expect(predictFinalVideoContainer(mp4Video, aacAudio)).toBe("mp4");
+    expect(predictFinalVideoContainer(webmVideo, opusAudio)).toBe("webm");
+    expect(predictFinalVideoContainer(mp4Video, opusAudio)).toBe("mkv");
   });
 
   it("builds sorted filter options from video formats", () => {

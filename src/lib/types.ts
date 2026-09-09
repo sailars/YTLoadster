@@ -6,6 +6,23 @@ export type AppStatus = {
   platform: string;
 };
 
+export type DiskSpace = {
+  available: number;
+  total: number;
+};
+
+export type UpdateCheckResult = {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  releaseUrl: string;
+};
+
+export type UpdateCheckState = {
+  status: "idle" | "checking" | "upToDate" | "available" | "error";
+  result?: UpdateCheckResult;
+};
+
 export type ToolStatus = {
   name: string;
   path?: string | null;
@@ -33,11 +50,13 @@ export type FormatOption = {
   fps?: number | null;
   dynamicRange?: string | null;
   audioChannels?: number | null;
+  bitrateKbps?: number | null;
 };
 
 export type MediaInfo = {
   title: string;
   uploader?: string | null;
+  originalLanguage?: string | null;
   duration?: number | null;
   webpageUrl?: string | null;
   thumbnail?: string | null;
@@ -133,8 +152,18 @@ export type AppSettings = {
   ffprobePath?: string | null;
   concurrency: number;
   fragmentConcurrency: number;
+  downloadRetries: number;
+  fileAccessRetries: number;
+  fragmentRetries: number;
+  customUserAgentEnabled: boolean;
+  customUserAgent: string;
   includeVideoTechnicalDetailsInFilename: boolean;
+  playlistFormatSelectionMode: PlaylistFormatSelectionMode;
+  preventSystemSleepWhileDownloading: boolean;
+  minimizeToTray: boolean;
 };
+
+export type PlaylistFormatSelectionMode = "strict" | "adaptive";
 
 export type SettingsPatch = Partial<AppSettings>;
 
@@ -172,6 +201,7 @@ export type JobPhase = "Downloading" | "DownloadingVideo" | "DownloadingAudio" |
 
 export type Job = {
   id: number;
+  mediaSignature?: string | null;
   request: DownloadRequest;
   state: JobState;
   phase?: JobPhase | null;
@@ -179,4 +209,112 @@ export type Job = {
   speed?: string | null;
   eta?: string | null;
   error?: string | null;
+};
+
+export type PlaylistInfo = {
+  id: string;
+  title: string;
+  uploader?: string | null;
+  webpageUrl?: string | null;
+  thumbnail?: string | null;
+  totalDuration?: number | null;
+  entries: PlaylistEntry[];
+};
+
+export type PlaylistEntry = {
+  id: string;
+  index: number;
+  url: string;
+  title: string;
+  thumbnail?: string | null;
+  duration?: number | null;
+  availability?: string | null;
+};
+
+export type PlaylistItemState =
+  | "ready"
+  | "requiresAuth"
+  | "unavailable"
+  | "temporaryError"
+  | "error";
+
+export type ProbeIssueCode =
+  | "authenticationRequired"
+  | "ageRestricted"
+  | "privateVideo"
+  | "removedVideo"
+  | "membershipRequired"
+  | "geoRestricted"
+  | "forbidden"
+  | "rateLimited"
+  | "network"
+  | "missingTool"
+  | "unknown";
+
+export type ProbeIssue = {
+  code: ProbeIssueCode;
+  message: string;
+  retryable: boolean;
+  requiresAuth: boolean;
+};
+
+export type PlaylistItemAnalysis = {
+  entryId: string;
+  state: PlaylistItemState;
+  media?: MediaInfo | null;
+  issue?: ProbeIssue | null;
+};
+
+export type BatchDownloadItem = {
+  clientId: string;
+  request: DownloadRequest;
+};
+
+export type BatchEnqueuedItem = {
+  clientId: string;
+  job: Job;
+};
+
+export type BatchRejection = {
+  clientId: string;
+  code: string;
+};
+
+export type BatchEnqueueResult = {
+  queued: BatchEnqueuedItem[];
+  rejected: BatchRejection[];
+};
+
+export type HistoryCheckItem = {
+  clientId: string;
+  request: DownloadRequest;
+};
+
+export type HistoryDuplicate = {
+  clientId: string;
+  historyId: string;
+};
+
+export type HistoryItem = {
+  id: string;
+  url: string;
+  canonicalSource?: string | null;
+  title: string;
+  thumbnail?: string | null;
+  outputPath?: string | null;
+  destinationDir?: string | null;
+  preset: string;
+  formatLabel?: string | null;
+  fileSizeBytes?: number | null;
+  completedAtMs?: number | null;
+  completedAtLegacy?: string | null;
+  mediaSignature?: string | null;
+  request?: DownloadRequest | null;
+};
+
+export type DownloadFinishedEvent = {
+  job: Job;
+  history?: HistoryItem | null;
+  outputPath: string;
+  historyError?: string | null;
 };
