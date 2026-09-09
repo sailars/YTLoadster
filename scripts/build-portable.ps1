@@ -19,7 +19,9 @@ foreach ($document in @(
   "licenses\FRONTEND_LICENSES.txt",
   "licenses\DEPENDENCY_LICENSES.html",
   "licenses\DENO_MIT.txt",
-  "licenses\YTDLP_GPL-3.0.txt"
+  "licenses\YTDLP_GPL-3.0.txt",
+  "src\assets\fonts\Montserrat-OFL.txt",
+  "src\assets\fonts\Onest-OFL.txt"
 )) {
   if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $document) -PathType Leaf)) {
     throw "Не найден обязательный лицензионный документ: $document"
@@ -82,6 +84,8 @@ Copy-Item -LiteralPath (Join-Path $projectRoot "licenses\FRONTEND_LICENSES.txt")
 Copy-Item -LiteralPath (Join-Path $projectRoot "licenses\DEPENDENCY_LICENSES.html") -Destination (Join-Path $stagingDir "DEPENDENCY_LICENSES.html")
 Copy-Item -LiteralPath (Join-Path $projectRoot "licenses\DENO_MIT.txt") -Destination (Join-Path $stagingDir "DENO_MIT.txt")
 Copy-Item -LiteralPath (Join-Path $projectRoot "licenses\YTDLP_GPL-3.0.txt") -Destination (Join-Path $stagingDir "YTDLP_GPL-3.0.txt")
+Copy-Item -LiteralPath (Join-Path $projectRoot "src\assets\fonts\Montserrat-OFL.txt") -Destination (Join-Path $stagingDir "Montserrat-OFL.txt")
+Copy-Item -LiteralPath (Join-Path $projectRoot "src\assets\fonts\Onest-OFL.txt") -Destination (Join-Path $stagingDir "Onest-OFL.txt")
 Copy-Item -LiteralPath (Join-Path $toolsDir "yt-dlp.exe") -Destination $portableToolsDir
 Copy-Item -LiteralPath (Join-Path $toolsDir "deno.exe") -Destination $portableToolsDir
 Copy-Item -LiteralPath (Join-Path $toolsDir "ffmpeg") -Destination $portableToolsDir -Recurse

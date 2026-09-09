@@ -1,10 +1,12 @@
-import { useLayoutEffect, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useState } from "react";
 import packageMetadata from "../../package.json";
 import { useI18n, type AppLocale, type Translate } from "../lib/i18n";
 import type {
   AppSettings,
   BrowserAuthSettings,
+  PlaylistFormatSelectionMode,
   SettingsPatch,
+  UpdateCheckState,
   YoutubeAuthPhase,
   YoutubeAuthStatus,
 } from "../lib/types";
@@ -28,6 +30,10 @@ type Props = {
   onYoutubeWebviewLogin: () => void;
   onYoutubeLogout: () => void;
   onYoutubeClear: () => void;
+  updateCheck: UpdateCheckState;
+  automaticUpdateChecksEnabled: boolean;
+  onCheckForUpdates: () => void;
+  onAutomaticUpdateChecksChange: (enabled: boolean) => void;
   onOpenExternalUrl: (url: string) => void;
   onClose: () => void;
 };
@@ -37,7 +43,12 @@ type ConnectionRiskKind = "downloads" | "fragments";
 
 const concurrencyOptions = [1, 2, 4, 6, 8];
 const fragmentConcurrencyOptions = [1, 2, 4, 8];
-const projectUrl = "https://github.com/";
+const defaultRetrySettings = {
+  downloadRetries: 10,
+  fileAccessRetries: 3,
+  fragmentRetries: 10,
+};
+const projectUrl = "https://github.com/sailars/YTLoadster";
 const openSourceComponents = [
   { name: "yt-dlp", url: "https://github.com/yt-dlp/yt-dlp" },
   { name: "Deno", url: "https://github.com/denoland/deno" },
@@ -62,12 +73,21 @@ export function SettingsPanel({
   onYoutubeWebviewLogin,
   onYoutubeLogout,
   onYoutubeClear,
+  updateCheck,
+  automaticUpdateChecksEnabled,
+  onCheckForUpdates,
+  onAutomaticUpdateChecksChange,
   onOpenExternalUrl,
   onClose,
 }: Props) {
   const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<SettingsTab>("main");
   const [youtubeAuthWarningOpen, setYoutubeAuthWarningOpen] = useState(false);
+  const [customUserAgentDraft, setCustomUserAgentDraft] = useState(downloadSettings.customUserAgent);
+
+  useEffect(() => {
+    setCustomUserAgentDraft(downloadSettings.customUserAgent);
+  }, [downloadSettings.customUserAgent]);
 
   useLayoutEffect(() => {
     if (isOpen) {
@@ -89,6 +109,13 @@ export function SettingsPanel({
   const youtubeAuthBusy = ["opening", "waiting", "finishing", "capturing"].includes(
     youtubeAuthPhase,
   );
+  const normalizedCustomUserAgent = customUserAgentDraft.trim();
+  const customUserAgentError = validateCustomUserAgent(
+    customUserAgentDraft,
+    downloadSettings.customUserAgentEnabled,
+    t,
+  );
+  const customUserAgentDirty = normalizedCustomUserAgent !== downloadSettings.customUserAgent;
 
   if (!isOpen) {
     return null;
@@ -161,36 +188,97 @@ export function SettingsPanel({
             role="tabpanel"
             aria-labelledby="settings-main-tab"
           >
+            <section className="settings-section" aria-labelledby="behavior-settings-title">
+              <h3 id="behavior-settings-title">{t("settings.behavior")}</h3>
+              <div className="settings-toggle-with-help">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={downloadSettings.preventSystemSleepWhileDownloading}
+                    onChange={(event) => onDownloadSettingsChange({
+                      preventSystemSleepWhileDownloading: event.target.checked,
+                    })}
+                  />
+                  <span>{t("settings.preventSleep")}</span>
+                </label>
+                <span
+                  className="auth-help-icon"
+                  tabIndex={0}
+                  role="img"
+                  aria-label={t("settings.preventSleepHelp")}
+                  data-tooltip={t("settings.preventSleepHelp")}
+                >
+                  ?
+                </span>
+              </div>
+              <div className="settings-toggle-with-help">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={downloadSettings.minimizeToTray}
+                    onChange={(event) => onDownloadSettingsChange({
+                      minimizeToTray: event.target.checked,
+                    })}
+                  />
+                  <span>{t("settings.minimizeToTray")}</span>
+                </label>
+                <span
+                  className="auth-help-icon"
+                  tabIndex={0}
+                  role="img"
+                  aria-label={t("settings.minimizeToTrayHelp")}
+                  data-tooltip={t("settings.minimizeToTrayHelp")}
+                >
+                  ?
+                </span>
+              </div>
+            </section>
+
             <section className="settings-section" aria-labelledby="auth-settings-title">
               <h3 id="auth-settings-title">{t("settings.authorization")}</h3>
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={settings.useBrowserCookies}
-                  onChange={(event) =>
-                    onChange({ ...settings, useBrowserCookies: event.target.checked })
-                  }
-                />
-                <span>{t("settings.browserLogin")}</span>
-              </label>
+              <div className="browser-cookie-auth-block">
+                <div className="browser-cookie-auth-heading">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.useBrowserCookies}
+                      onChange={(event) =>
+                        onChange({ ...settings, useBrowserCookies: event.target.checked })
+                      }
+                    />
+                    <span>{t("settings.browserLogin")}</span>
+                  </label>
+                  <span
+                    className="auth-help-icon"
+                    tabIndex={0}
+                    role="img"
+                    aria-label={t("settings.browserLoginHelp")}
+                    data-tooltip={t("settings.browserLoginHelp")}
+                  >
+                    ?
+                  </span>
+                </div>
+                <p className="settings-hint">{t("settings.browserLoginDescription")}</p>
 
-              <label className="settings-field">
-                <span>{t("settings.browser")}</span>
-                <ParameterSelect
-                  label={t("settings.browser")}
-                  value={settings.browser}
-                  onChange={(browser) => onChange({ ...settings, browser })}
-                  disabled={!settings.useBrowserCookies}
-                  options={browserOptions}
-                />
-                <small className="settings-hint">
-                  {platform === "macos" ? t("settings.browserMacHint") : t("settings.browserHint")}
-                </small>
-              </label>
+                {settings.useBrowserCookies ? (
+                  <div className="settings-field browser-cookie-browser-field">
+                    <span>{t("settings.browser")}</span>
+                    <ParameterSelect
+                      label={t("settings.browser")}
+                      value={settings.browser}
+                      onChange={(browser) => onChange({ ...settings, browser })}
+                      options={browserOptions}
+                    />
+                    <small className="settings-hint">
+                      {platform === "macos" ? t("settings.browserMacHint") : t("settings.browserHint")}
+                    </small>
+                  </div>
+                ) : null}
+              </div>
 
               <div className="youtube-auth-block">
                 <div className="youtube-auth-heading">
-                  <span>{t("settings.youtubeAuth")}</span>
+                  <span>{t("settings.youtubeAuthFallback")}</span>
                   <span
                     className="auth-help-icon"
                     tabIndex={0}
@@ -270,7 +358,7 @@ export function SettingsPanel({
 
             <section className="settings-section" aria-labelledby="interface-settings-title">
               <h3 id="interface-settings-title">{t("settings.interface")}</h3>
-              <label className="settings-field settings-language-field">
+              <div className="settings-field settings-language-field">
                 <span>{t("settings.language")}</span>
                 <ParameterSelect
                   label={t("settings.language")}
@@ -281,7 +369,7 @@ export function SettingsPanel({
                     { value: "en", label: t("settings.languageEnglish") },
                   ]}
                 />
-              </label>
+              </div>
             </section>
           </div>
         ) : activeTab === "downloads" ? (
@@ -293,16 +381,6 @@ export function SettingsPanel({
           >
             <section className="settings-section settings-downloads-section" aria-labelledby="download-settings-title">
               <h3 id="download-settings-title">{t("settings.downloads")}</h3>
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={downloadSettings.includeVideoTechnicalDetailsInFilename}
-                  onChange={(event) => onDownloadSettingsChange({
-                    includeVideoTechnicalDetailsInFilename: event.target.checked,
-                  })}
-                />
-                <span>{t("settings.videoTechnicalFilename")}</span>
-              </label>
               <div className="settings-field-grid">
                 <div className="settings-field">
                   <span>{t("settings.concurrent")}</span>
@@ -330,6 +408,140 @@ export function SettingsPanel({
                   <ConnectionRisk value={downloadSettings.fragmentConcurrency} kind="fragments" />
                 </div>
               </div>
+            </section>
+
+            <section className="settings-section settings-file-names-section" aria-labelledby="file-name-settings-title">
+              <h3 id="file-name-settings-title">{t("settings.fileNames")}</h3>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={downloadSettings.includeVideoTechnicalDetailsInFilename}
+                  onChange={(event) => onDownloadSettingsChange({
+                    includeVideoTechnicalDetailsInFilename: event.target.checked,
+                  })}
+                />
+                <span>{t("settings.videoTechnicalFilename")}</span>
+              </label>
+            </section>
+
+            <section className="settings-section settings-playlist-format-section" aria-labelledby="playlist-format-settings-title">
+              <h3 id="playlist-format-settings-title">{t("settings.playlists")}</h3>
+              <div className="settings-field settings-playlist-format-mode">
+                <div className="settings-field-label-with-help">
+                  <span>{t("settings.playlistFormatSelectionMode")}</span>
+                  <span
+                    className="auth-help-icon"
+                    tabIndex={0}
+                    role="img"
+                    aria-label={t("settings.playlistFormatSelectionHelp")}
+                    data-tooltip={t("settings.playlistFormatSelectionHelp")}
+                  >
+                    ?
+                  </span>
+                </div>
+                <ParameterSelect
+                  label={t("settings.playlistFormatSelectionMode")}
+                  value={downloadSettings.playlistFormatSelectionMode}
+                  options={[
+                    { value: "strict", label: t("settings.playlistFormatStrict"), description: t("settings.playlistFormatStrictDescription") },
+                    { value: "adaptive", label: t("settings.playlistFormatAdaptive"), description: t("settings.playlistFormatAdaptiveDescription") },
+                  ]}
+                  onChange={(playlistFormatSelectionMode) => onDownloadSettingsChange({
+                    playlistFormatSelectionMode: playlistFormatSelectionMode as PlaylistFormatSelectionMode,
+                  })}
+                />
+              </div>
+            </section>
+
+            <section className="settings-section settings-retries-section" aria-labelledby="retry-settings-title">
+              <div className="settings-section-heading">
+                <div>
+                  <h3 id="retry-settings-title">{t("settings.retries")}</h3>
+                  <p className="settings-hint">{t("settings.retriesHint")}</p>
+                </div>
+                <button
+                  type="button"
+                  className="secondary settings-reset-button"
+                  onClick={() => onDownloadSettingsChange(defaultRetrySettings)}
+                >
+                  {t("settings.restoreDefaults")}
+                </button>
+              </div>
+              <div className="settings-field-grid settings-retry-grid">
+                <RetryNumberField
+                  label={t("settings.downloadRetries")}
+                  description={t("settings.downloadRetriesHint")}
+                  max={30}
+                  value={downloadSettings.downloadRetries}
+                  onChange={(downloadRetries) => onDownloadSettingsChange({ downloadRetries })}
+                />
+                <RetryNumberField
+                  label={t("settings.fileAccessRetries")}
+                  description={t("settings.fileAccessRetriesHint")}
+                  max={10}
+                  value={downloadSettings.fileAccessRetries}
+                  onChange={(fileAccessRetries) => onDownloadSettingsChange({ fileAccessRetries })}
+                />
+                <RetryNumberField
+                  label={t("settings.fragmentRetries")}
+                  description={t("settings.fragmentRetriesHint")}
+                  max={30}
+                  value={downloadSettings.fragmentRetries}
+                  onChange={(fragmentRetries) => onDownloadSettingsChange({ fragmentRetries })}
+                />
+              </div>
+            </section>
+
+            <section className="settings-section settings-user-agent-section" aria-labelledby="user-agent-settings-title">
+              <h3 id="user-agent-settings-title">{t("settings.userAgent")}</h3>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={downloadSettings.customUserAgentEnabled}
+                  disabled={!downloadSettings.customUserAgentEnabled && Boolean(validateCustomUserAgent(customUserAgentDraft, true, t))}
+                  onChange={(event) => {
+                    if (event.target.checked) {
+                      onDownloadSettingsChange({
+                        customUserAgentEnabled: true,
+                        customUserAgent: normalizedCustomUserAgent,
+                      });
+                    } else {
+                      onDownloadSettingsChange({ customUserAgentEnabled: false });
+                    }
+                  }}
+                />
+                <span>{t("settings.useCustomUserAgent")}</span>
+              </label>
+              <p className="settings-hint" id="custom-user-agent-hint">{t("settings.userAgentHint")}</p>
+              <div className="settings-user-agent-row">
+                <label className="settings-field">
+                  <span>User-Agent</span>
+                  <input
+                    type="text"
+                    value={customUserAgentDraft}
+                    maxLength={1024}
+                    placeholder="Mozilla/5.0 ..."
+                    aria-describedby="custom-user-agent-hint custom-user-agent-error"
+                    aria-invalid={Boolean(customUserAgentError)}
+                    onChange={(event) => setCustomUserAgentDraft(event.target.value)}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="secondary settings-user-agent-save"
+                  disabled={!customUserAgentDirty || Boolean(customUserAgentError)}
+                  onClick={() => onDownloadSettingsChange({ customUserAgent: normalizedCustomUserAgent })}
+                >
+                  {t("common.save")}
+                </button>
+              </div>
+              <p
+                id="custom-user-agent-error"
+                className={`settings-validation${customUserAgentError ? " visible" : ""}`}
+                role={customUserAgentError ? "alert" : undefined}
+              >
+                {customUserAgentError ?? "\u00a0"}
+              </p>
             </section>
           </div>
         ) : (
@@ -360,6 +572,52 @@ export function SettingsPanel({
                 </dd>
               </div>
             </dl>
+            <section className="about-update" aria-labelledby="about-update-title">
+              <div className="about-update-heading">
+                <h3 id="about-update-title">{t("updates.title")}</h3>
+                <button
+                  type="button"
+                  className="secondary about-update-check"
+                  disabled={updateCheck.status === "checking"}
+                  onClick={onCheckForUpdates}
+                >
+                  {updateCheck.status === "checking"
+                    ? t("updates.checkingAction")
+                    : t("updates.checkAction")}
+                </button>
+              </div>
+              <label className="about-update-toggle">
+                <span className="about-update-toggle-label">
+                  {t("updates.automatic")}
+                </span>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={automaticUpdateChecksEnabled}
+                  onChange={(event) =>
+                    onAutomaticUpdateChecksChange(event.target.checked)
+                  }
+                />
+                <span className="about-update-toggle-control" aria-hidden="true" />
+              </label>
+              <p
+                className="about-update-status"
+                data-state={updateCheck.status}
+                role="status"
+                aria-live="polite"
+              >
+                {updateStatusText(updateCheck, t)}
+              </p>
+              {updateCheck.status === "available" && updateCheck.result ? (
+                <button
+                  type="button"
+                  className="primary about-update-open"
+                  onClick={() => onOpenExternalUrl(updateCheck.result!.releaseUrl)}
+                >
+                  {t("updates.openRelease")}
+                </button>
+              ) : null}
+            </section>
             <section className="about-components" aria-labelledby="about-components-title">
               <h3 id="about-components-title">{t("settings.openSource")}</h3>
               <p>{t("settings.openSourceText")}</p>
@@ -429,6 +687,85 @@ export function SettingsPanel({
       ) : null}
     </div>
   );
+}
+
+function RetryNumberField({
+  label,
+  description,
+  max,
+  value,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  max: number;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  const tooltipId = useId();
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const parsed = Number.parseInt(draft, 10);
+    const normalized = Number.isFinite(parsed) ? Math.min(max, Math.max(0, parsed)) : value;
+    setDraft(String(normalized));
+    if (normalized !== value) onChange(normalized);
+  };
+
+  return (
+    <label className="settings-field settings-retry-field">
+      <span className="settings-retry-label-wrap">
+        <span className="settings-retry-label" tabIndex={0} aria-describedby={tooltipId}>
+          {label}
+        </span>
+        <span id={tooltipId} className="settings-retry-tooltip" role="tooltip">
+          {description}
+        </span>
+      </span>
+      <input
+        type="number"
+        min={0}
+        max={max}
+        step={1}
+        value={draft}
+        aria-label={label}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+        }}
+      />
+    </label>
+  );
+}
+
+function validateCustomUserAgent(value: string, required: boolean, t: Translate) {
+  const normalized = value.trim();
+  if (required && !normalized) return t("settings.userAgentRequired");
+  if (normalized.length > 1024) return t("settings.userAgentTooLong");
+  if (/[\u0000-\u001f\u007f]/.test(normalized)) return t("settings.userAgentInvalid");
+  return null;
+}
+
+function updateStatusText(updateCheck: UpdateCheckState, t: Translate) {
+  switch (updateCheck.status) {
+    case "checking":
+      return t("updates.checking");
+    case "upToDate":
+      return t("updates.upToDate");
+    case "available":
+      return t("updates.available", {
+        version: updateCheck.result?.latestVersion ?? "",
+      });
+    case "error":
+      return t("updates.error");
+    default:
+      return t("updates.notChecked");
+  }
 }
 
 function openExternalLink(

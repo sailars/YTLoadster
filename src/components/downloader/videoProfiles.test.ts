@@ -6,6 +6,14 @@ const video = (formatId: string, height: number, codec = "avc1", ext = "mp4"): F
 const audio = (formatId: string, codec = "mp4a", ext = "m4a"): FormatOption => ({ formatId, qualityLabel: "128kbps", kind: "audio", codec, ext, filesize: 10 });
 
 describe("resolveVideoProfile", () => {
+  it("selects exact best video and audio streams for the best-quality profile", () => {
+    expect(resolveVideoProfile("best", [video("137", 1080)], [audio("140")])).toMatchObject({
+      available: true,
+      videoFormatId: "137",
+      audioFormatId: "140",
+    });
+  });
+
   it("uses the exact selected H.264 and AAC streams for a device profile", () => {
     expect(resolveVideoProfile("universal", [video("137", 1080), video("399", 1080, "av01")], [audio("140"), audio("251", "opus", "webm")])).toMatchObject({ available: true, videoFormatId: "137", audioFormatId: "140" });
   });

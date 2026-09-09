@@ -1,5 +1,7 @@
 import type { MediaInfo } from "../../lib/types";
 import { useI18n, type Translate } from "../../lib/i18n";
+import { MediaThumbnail } from "../MediaThumbnail";
+import { UrlInput } from "./UrlInput";
 
 type Props = {
   url: string;
@@ -27,42 +29,31 @@ export function MediaPreview({
   const { locale, t } = useI18n();
   return (
     <div className="media-column">
-      <label className="input-label" htmlFor="video-url">
-        {t("media.url")}
-      </label>
-      <div className="url-row">
-        <input
-          id="video-url"
-          value={url}
-          data-has-url={Boolean(url.trim())}
-          onChange={(event) => onUrlChange(event.target.value)}
-          placeholder={t("media.placeholder")}
-        />
-        <button type="button" className="icon-button url-action-button" aria-label={t("media.paste")} title={t("media.paste")} onClick={onPaste}>
-          <PasteIcon />
-        </button>
-        <button
-          type="button"
-          className="icon-button url-action-button"
-          aria-label={t("media.clear")}
-          title={t("media.clear")}
-          onClick={onClear}
-          disabled={!url.trim()}
-        >
-          <ClearIcon />
-        </button>
-      </div>
+      <UrlInput
+        id="video-url"
+        label={t("media.url")}
+        value={url}
+        placeholder={t("media.placeholder")}
+        pasteLabel={t("media.paste")}
+        pasteTooltip={t("media.pasteTooltip")}
+        clearLabel={t("media.clear")}
+        onChange={onUrlChange}
+        onPaste={onPaste}
+        onClear={onClear}
+      />
 
       {error ? <p className="error">{error}</p> : null}
       {isAnalyzing ? <p className="analysis-status">{t("media.analyzing")}</p> : null}
 
       {media ? (
         <div className="media-card">
-          {media.thumbnail ? (
-            <img className="media-thumbnail" src={media.thumbnail} alt={t("media.preview")} />
-          ) : (
-            <div className="media-thumbnail placeholder" aria-hidden="true" />
-          )}
+          <MediaThumbnail
+            src={media.thumbnail}
+            mediaUrl={media.webpageUrl || url}
+            alt={t("media.preview")}
+            className="media-thumbnail"
+            placeholderClassName="media-thumbnail placeholder"
+          />
           <div className="media-copy">
             <h2>{media.title}</h2>
             <p className="media-meta">{mediaMeta(media, locale, t)}</p>
@@ -114,26 +105,6 @@ function formatViewCount(value: number | null | undefined, locale: "ru" | "en", 
 function trimDescription(value: string) {
   const normalized = value.replace(/\s+/g, " ").trim();
   return normalized.length > 190 ? `${normalized.slice(0, 187)}...` : normalized;
-}
-
-function PasteIcon() {
-  return (
-    <svg className="url-action-icon" aria-hidden="true" viewBox="0 0 24 24" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M8 5H6.75A2.25 2.25 0 0 0 4.5 7.25v12A2.25 2.25 0 0 0 6.75 21h10.5a2.25 2.25 0 0 0 2.25-2.25V7.25A2.25 2.25 0 0 0 17.25 5H16" />
-      <rect x="8" y="2.75" width="8" height="4.5" rx="1.5" />
-      <path d="M8.5 11.5h7" />
-      <path d="M8.5 15.5h5" />
-    </svg>
-  );
-}
-
-function ClearIcon() {
-  return (
-    <svg className="url-action-icon clear-url-icon" aria-hidden="true" viewBox="0 0 24 24" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round">
-      <path d="M7 7l10 10" />
-      <path d="M17 7 7 17" />
-    </svg>
-  );
 }
 
 function ExternalLinkIcon() {

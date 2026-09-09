@@ -154,7 +154,7 @@ export function ParameterSelect({ label, value, options, onChange, disabled = fa
       >
         <span className="parameter-select-selected-copy">
           <span className="parameter-select-label">{selected?.icon ? <span className="parameter-select-icon" aria-hidden="true">{selected.icon}</span> : null}{selected?.label ?? ""}</span>
-          {selected?.description ? <small>{selected.description}</small> : null}
+          {selected?.description ? <small title={selected.description}>{selected.description}</small> : null}
         </span>
         <ChevronIcon expanded={isOpen} />
       </button>
@@ -189,7 +189,7 @@ export function ParameterSelect({ label, value, options, onChange, disabled = fa
               >
                 <span className="parameter-select-option-copy">
                   <span className="parameter-select-label">{option.icon ? <span className="parameter-select-icon" aria-hidden="true">{option.icon}</span> : null}{option.label}</span>
-                  {option.description ? <small>{option.description}</small> : null}
+                  {option.description ? <small title={option.description}>{option.description}</small> : null}
                   {option.disabled && option.disabledReason ? <small className="parameter-select-disabled-reason">{option.disabledReason}</small> : null}
                 </span>
               </button>

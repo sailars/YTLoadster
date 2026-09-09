@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   CookieSource,
+  DiskSpace,
   AppStatus,
   DownloadRequest,
   AppSettings,
@@ -10,11 +11,20 @@ import type {
   MediaInfo,
   SettingsPatch,
   ToolInventory,
+  UpdateCheckResult,
   YoutubeAuthStart,
   YoutubeAuthStatus,
   YoutubeAuthWindowState,
   YoutubeWebviewAuthState,
   BrowserCookie,
+  BatchDownloadItem,
+  BatchEnqueueResult,
+  DownloadFinishedEvent,
+  HistoryCheckItem,
+  HistoryDuplicate,
+  HistoryItem,
+  PlaylistInfo,
+  PlaylistItemAnalysis,
 } from "./types";
 
 export const api = {
@@ -24,14 +34,23 @@ export const api = {
   getToolStatus() {
     return invoke<ToolInventory>("get_tool_status");
   },
+  checkForUpdates() {
+    return invoke<UpdateCheckResult>("check_for_updates");
+  },
   getDefaultDownloadDir() {
     return invoke<string>("get_default_download_dir");
+  },
+  getAvailableDiskSpace(path: string) {
+    return invoke<DiskSpace>("get_available_disk_space", { path });
   },
   getSettings() {
     return invoke<AppSettings>("get_settings");
   },
   updateSettings(patch: SettingsPatch) {
     return invoke<AppSettings>("update_settings", { patch });
+  },
+  setTrayLocale(locale: "ru" | "en") {
+    return invoke<void>("set_tray_locale", { locale });
   },
   async selectDownloadDir(currentDir?: string | null) {
     const selected = await open({
@@ -44,8 +63,33 @@ export const api = {
   probeUrl(url: string, cookieSource?: CookieSource | null) {
     return invoke<MediaInfo>("probe_url", { url, cookieSource: cookieSource ?? null });
   },
+  probePlaylist(url: string, cookieSource?: CookieSource | null) {
+    return invoke<PlaylistInfo>("probe_playlist", { url, cookieSource: cookieSource ?? null });
+  },
+  probePlaylistItem(entryId: string, url: string, cookieSource?: CookieSource | null) {
+    return invoke<PlaylistItemAnalysis>("probe_playlist_item", {
+      entryId,
+      url,
+      cookieSource: cookieSource ?? null,
+    });
+  },
   enqueueDownload(request: DownloadRequest) {
     return invoke<Job>("enqueue_download", { request });
+  },
+  enqueueDownloadBatch(items: BatchDownloadItem[]) {
+    return invoke<BatchEnqueueResult>("enqueue_download_batch", { items });
+  },
+  checkHistoryDuplicates(items: HistoryCheckItem[]) {
+    return invoke<HistoryDuplicate[]>("check_history_duplicates", { items });
+  },
+  getHistory() {
+    return invoke<HistoryItem[]>("get_history");
+  },
+  removeHistoryItem(id: string) {
+    return invoke<void>("remove_history_item", { id });
+  },
+  clearHistory() {
+    return invoke<void>("clear_history");
   },
   getJobs() {
     return invoke<Job[]>("get_jobs");
@@ -123,5 +167,8 @@ export const api = {
   },
   onDownloadUpdated(callback: (job: Job) => void) {
     return listen<Job>("download-updated", (event) => callback(event.payload));
+  },
+  onDownloadFinished(callback: (event: DownloadFinishedEvent) => void) {
+    return listen<DownloadFinishedEvent>("download-finished", (event) => callback(event.payload));
   },
 };

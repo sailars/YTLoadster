@@ -1,5 +1,5 @@
-import type { Job } from "../lib/types";
-import { useState } from "react";
+import type { Job, JobState } from "../lib/types";
+import { useEffect, useState } from "react";
 import {
   isYouTubeAgeRestrictionError,
   isYouTubeBotConfirmationError,
@@ -7,6 +7,7 @@ import {
   sanitizeTechnicalError,
 } from "../lib/errors";
 import { localizeTechnicalText, useI18n, type AppLocale, type Translate, type TranslationKey } from "../lib/i18n";
+import { MediaThumbnail } from "./MediaThumbnail";
 
 const insufficientDiskSpaceError = "download-error:insufficient-disk-space";
 const missingFfmpegError = "download-error:missing-ffmpeg";
@@ -38,24 +39,36 @@ export function Queue({
   onOpenFolder,
   onRetry,
 }: Props) {
-  const { locale, t } = useI18n();
-  const runningJobs = jobs.filter((job) => job.state === "Running").length;
-  const pausedJobs = jobs.filter((job) => job.state === "Paused");
+  const { t } = useI18n();
+  const [filter, setFilter] = useState<JobState | "All">("All");
+  const queueJobs = jobs.filter((job) => job.state !== "Completed");
+  const groupOrder: JobState[] = ["Running", "Pending", "Paused", "Failed", "Cancelled"];
+  const runningJobs = queueJobs.filter((job) => job.state === "Running").length;
+  const pausedJobs = queueJobs.filter((job) => job.state === "Paused");
   const pauseAllIsResume = pausedJobs.length > 0;
-  const cancellableJobs = jobs.filter((job) =>
+  const cancellableJobs = queueJobs.filter((job) =>
     ["Pending", "Running", "Paused"].includes(job.state),
   ).length;
-  const clearableJobs = jobs.filter((job) =>
-    ["Completed", "Failed", "Cancelled"].includes(job.state),
+  const clearableJobs = queueJobs.filter((job) =>
+    ["Failed", "Cancelled"].includes(job.state),
   ).length;
+  const presentStates = groupOrder.filter((state) => queueJobs.some((job) => job.state === state));
+  const visibleJobs = filter === "All" ? queueJobs : queueJobs.filter((job) => job.state === filter);
+  const groupedJobs = groupOrder
+    .map((state) => ({ state, jobs: visibleJobs.filter((job) => job.state === state) }))
+    .filter((group) => group.jobs.length > 0);
+
+  useEffect(() => {
+    if (filter !== "All" && !queueJobs.some((job) => job.state === filter)) setFilter("All");
+  }, [filter, queueJobs]);
 
   return (
     <section className="queue-panel" aria-label={t("queue.label")}>
-      <div className="section-heading">
+      <div className="section-heading queue-header">
         <div className="queue-heading-title">
           <h2>{t("queue.label")}</h2>
-          <span className="queue-count" aria-label={t("queue.count", { count: jobs.length })}>
-            {jobs.length}
+          <span className="queue-count" aria-label={t("queue.activeCount", { count: cancellableJobs })}>
+            {cancellableJobs}
           </span>
         </div>
         <div className="queue-actions queue-actions-horizontal">
@@ -88,7 +101,27 @@ export function Queue({
           />
         </div>
       </div>
-      {jobs.length === 0 ? (
+
+      {queueJobs.length > 0 ? (
+        <div className="queue-status-filters" role="toolbar" aria-label={t("queue.filters")}>
+          <button type="button" className="queue-filter-chip filter-all" data-active={filter === "All" || undefined} onClick={() => setFilter("All")}>
+            {t("queue.filterAll")} · {queueJobs.length}
+          </button>
+          {presentStates.map((state) => (
+            <button
+              key={state}
+              type="button"
+              className={`queue-filter-chip state-${state.toLowerCase()}`}
+              data-active={filter === state || undefined}
+              onClick={() => setFilter((current) => current === state ? "All" : state)}
+            >
+              {t(`state.${state}` as TranslationKey)} · {queueJobs.filter((job) => job.state === state).length}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {queueJobs.length === 0 ? (
         <div className="queue-empty">
           <QueueEmptyIcon />
           <div>
@@ -96,114 +129,104 @@ export function Queue({
             <span>{t("queue.emptyText")}</span>
           </div>
         </div>
+      ) : groupedJobs.length === 0 ? (
+        <div className="queue-filter-empty">{t("queue.filteredEmpty")}</div>
       ) : (
-        <ol className="job-list">
-          {jobs.map((job) => (
-            <li key={job.id} className="job-row">
-              {job.request?.thumbnail ? (
-                <img
-                  className="queue-thumbnail"
-                  src={job.request.thumbnail}
-                  alt={t("queue.preview", { title: job.request.title ?? job.id })}
-                />
-              ) : (
-                <div className="queue-thumbnail placeholder" aria-hidden="true" />
-              )}
-              <div className="job-main">
-                <QueueJobTitle title={job.request?.title ?? t("queue.untitled")} jobId={job.id} />
-                <span className="job-url">{job.request?.url ?? ""}</span>
-                <span className="job-params">{downloadParameters(job, locale, t)}</span>
-                {shouldShowProgress(job) ? (
-                  <>
-                    <div className={`progress-track ${isProcessingPhase(job) ? "post-processing" : ""}`} aria-label={t("queue.progress", { id: job.id })}>
-                      <div
-                        className={`progress-fill ${progressClass(job)}`}
-                        style={{ width: `${isProcessingPhase(job) ? 100 : job.progressPercent ?? 0}%` }}
-                      />
-                    </div>
-                    {job.state !== "Completed" && !isProcessingPhase(job) ? (
-                      <small>
-                        {job.progressPercent ?? 0}% {job.speed ? ` • ${job.speed}` : ""}
-                        {job.eta ? ` • ${t("queue.remaining", { eta: job.eta })}` : ""}
-                      </small>
-                    ) : null}
-                  </>
-                ) : null}
-                {job.error ? <p className="error">{localizedJobError(job.error, locale, t)}</p> : null}
-              </div>
-              <div className="job-actions">
-                <strong>{jobStatus(job, t)}</strong>
-                {job.state === "Completed" ? (
-                  <button
-                    type="button"
-                    className="icon-button"
-                    aria-label={t("queue.openFolder", { title: job.request?.title ?? job.id })}
-                    onClick={() => onOpenFolder(job.request.destinationDir)}
-                  >
-                    <FolderIcon />
-                  </button>
-                ) : null}
-                {canRemoveFromQueue(job) ? (
-                  <button
-                    type="button"
-                    className="icon-button danger-action"
-                    aria-label={t("queue.remove", { title: job.request?.title ?? job.id })}
-                    title={t("queue.removeTitle")}
-                    onClick={() => onRemove(job.id)}
-                  >
-                    <TrashIcon />
-                  </button>
-                ) : null}
-                {job.state === "Running" ? (
-                  <button
-                    type="button"
-                    className="icon-button"
-                    aria-label={t("queue.pause", { title: job.request?.title ?? job.id })}
-                    title={t("queue.pauseTitle")}
-                    onClick={() => onPause(job.id)}
-                  >
-                    <PauseIcon />
-                  </button>
-                ) : null}
-                {job.state === "Paused" ? (
-                  <button
-                    type="button"
-                    className="icon-button"
-                    aria-label={t("queue.resume", { title: job.request?.title ?? job.id })}
-                    title={t("queue.resumeTitle")}
-                    onClick={() => onResume(job.id)}
-                  >
-                    <PlayIcon />
-                  </button>
-                ) : null}
-                {job.state === "Failed" || job.state === "Cancelled" ? (
-                  <button
-                    type="button"
-                    className="icon-button"
-                    aria-label={t("queue.retry", { title: job.request?.title ?? job.id })}
-                    title={t("queue.retryTitle")}
-                    onClick={() => onRetry(job.id)}
-                  >
-                    <ReturnIcon />
-                  </button>
-                ) : null}
-                {job.state === "Pending" || job.state === "Running" || job.state === "Paused" ? (
-                  <button
-                    type="button"
-                    className="icon-button danger-action"
-                    aria-label={t("queue.cancel", { title: job.request?.title ?? job.id })}
-                    title={t("queue.cancelTitle")}
-                    onClick={() => onCancel(job.id)}
-                  >
-                    <CloseIcon />
-                  </button>
-                ) : null}
-              </div>
-            </li>
+        <div className="queue-groups">
+          {groupedJobs.map((group) => (
+            <section key={group.state} className="queue-status-group" aria-labelledby={`queue-group-${group.state}`}>
+              <h3 id={`queue-group-${group.state}`} className="queue-group-title">{t(`state.${group.state}` as TranslationKey)} · {group.jobs.length}</h3>
+              <ol className="job-list">
+                {group.jobs.map((job) => (
+                  <QueueRow
+                    key={job.id}
+                    job={job}
+                    onCancel={onCancel}
+                    onPause={onPause}
+                    onResume={onResume}
+                    onRemove={onRemove}
+                    onRetry={onRetry}
+                  />
+                ))}
+              </ol>
+            </section>
           ))}
-        </ol>
+        </div>
       )}
     </section>
+  );
+}
+
+function QueueRow({
+  job,
+  onCancel,
+  onPause,
+  onResume,
+  onRemove,
+  onRetry,
+}: {
+  job: Job;
+  onCancel: (id: number) => void;
+  onPause: (id: number) => void;
+  onResume: (id: number) => void;
+  onRemove: (id: number) => void;
+  onRetry: (id: number) => void;
+}) {
+  const { locale, t } = useI18n();
+  const title = job.request?.title ?? t("queue.untitled");
+  return (
+    <li className="job-row" data-state={job.state.toLowerCase()}>
+      <MediaThumbnail
+        src={job.request?.thumbnail}
+        mediaUrl={job.request?.canonicalSource ?? job.request?.url}
+        alt={t("queue.preview", { title })}
+        className="queue-thumbnail"
+        placeholderClassName="queue-thumbnail placeholder"
+      />
+      <div className="job-main">
+        <div className="queue-job-heading">
+          <QueueJobTitle title={title} jobId={job.id} />
+          <span className={`queue-state-badge state-${job.state.toLowerCase()}`}>{jobStatus(job, t)}</span>
+        </div>
+        <span className="job-url">{job.request?.url ?? ""}</span>
+        <span className="job-params">{downloadParameters(job, locale, t)}</span>
+        {shouldShowProgress(job) ? (
+          <>
+            <div className={`progress-track ${isProcessingPhase(job) ? "post-processing" : ""}`} aria-label={t("queue.progress", { id: job.id })}>
+              <div
+                className={`progress-fill ${progressClass(job)}`}
+                style={{ width: `${isProcessingPhase(job) ? 100 : job.progressPercent ?? 0}%` }}
+              />
+            </div>
+            {!isProcessingPhase(job) ? (
+              <small className="queue-progress-copy">
+                <span>{job.progressPercent ?? 0}%</span>
+                {job.state === "Running" && job.speed ? <span>{job.speed}</span> : null}
+                {job.state === "Running" && job.eta ? <span>{t("queue.remaining", { eta: job.eta })}</span> : null}
+              </small>
+            ) : null}
+          </>
+        ) : null}
+        {job.error ? <p className="error">{localizedJobError(job.error, locale, t)}</p> : null}
+      </div>
+      <div className="job-actions">
+        {job.state === "Running" ? (
+          <button type="button" className="icon-button" aria-label={t("queue.pause", { title })} title={t("queue.pauseTitle")} onClick={() => onPause(job.id)}><PauseIcon /></button>
+        ) : null}
+        {job.state === "Paused" ? (
+          <button type="button" className="icon-button" aria-label={t("queue.resume", { title })} title={t("queue.resumeTitle")} onClick={() => onResume(job.id)}><PlayIcon /></button>
+        ) : null}
+        {job.state === "Failed" || job.state === "Cancelled" ? (
+          <button type="button" className="icon-button" aria-label={t("queue.retry", { title })} title={t("queue.retryTitle")} onClick={() => onRetry(job.id)}><ReturnIcon /></button>
+        ) : null}
+        {job.state === "Pending" || job.state === "Running" || job.state === "Paused" ? (
+          <button type="button" className="icon-button danger-action" aria-label={t("queue.cancel", { title })} title={t("queue.cancelTitle")} onClick={() => onCancel(job.id)}><CloseIcon /></button>
+        ) : null}
+        {canRemoveFromQueue(job) ? (
+          <button type="button" className="icon-button danger-action" aria-label={t("queue.remove", { title })} title={t("queue.removeTitle")} onClick={() => onRemove(job.id)}><TrashIcon /></button>
+        ) : null}
+      </div>
+    </li>
   );
 }
 
@@ -354,7 +377,7 @@ function jobStatus(job: Job, t: Translate) {
 }
 
 function canRemoveFromQueue(job: Job) {
-  return job.state !== "Running" && job.state !== "Paused";
+  return job.state === "Failed" || job.state === "Cancelled";
 }
 
 function FolderIcon() {
