@@ -97,6 +97,23 @@ export function SettingsPanel({
     }
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      if (youtubeAuthWarningOpen) {
+        setYoutubeAuthWarningOpen(false);
+        return;
+      }
+      onClose();
+    };
+
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [isOpen, onClose, youtubeAuthWarningOpen]);
+
   const browserOptions = [
     { value: "chrome", label: "Chrome" },
     { value: "firefox", label: "Firefox" },

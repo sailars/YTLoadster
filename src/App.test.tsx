@@ -420,7 +420,30 @@ describe("App", () => {
     expect(sidebar).toHaveAttribute("data-expanded", "true");
     expect(rail).toHaveAttribute("data-expanded", "true");
 
-    fireEvent.pointerLeave(sidebar);
+    vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 220,
+      bottom: 800,
+      width: 220,
+      height: 800,
+      toJSON: () => ({}),
+    });
+    fireEvent(sidebar, new MouseEvent("pointerout", {
+      bubbles: true,
+      clientX: 48,
+      clientY: 700,
+    }));
+    expect(sidebar).toHaveAttribute("data-expanded", "true");
+    expect(rail).toHaveAttribute("data-expanded", "true");
+
+    fireEvent(sidebar, new MouseEvent("pointerout", {
+      bubbles: true,
+      clientX: 240,
+      clientY: 700,
+    }));
     expect(sidebar).not.toHaveAttribute("data-expanded");
     expect(rail).not.toHaveAttribute("data-expanded");
   });
@@ -436,7 +459,8 @@ describe("App", () => {
     expect(utilities).not.toBeNull();
     expect(within(utilities!).getAllByRole("button")).toEqual([notificationButton, themeButton, settingsButton]);
     expect(themeButton).toHaveAttribute("aria-pressed", "false");
-    expect(themeButton.querySelector(".moon-icon")).toBeInTheDocument();
+    expect(themeButton.querySelector(".system-theme-icon")).toBeInTheDocument();
+    expect(themeButton.querySelector(".sidebar-label")).toHaveTextContent("Системная тема");
 
     await userEvent.click(themeButton);
 
@@ -444,18 +468,22 @@ describe("App", () => {
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     expect(window.localStorage.getItem(themeStorageKey)).toBe("dark");
     expect(lightThemeButton).toHaveAttribute("aria-pressed", "true");
-    expect(lightThemeButton.querySelector(".sun-icon")).toBeInTheDocument();
+    expect(lightThemeButton.querySelector(".moon-icon")).toBeInTheDocument();
+    expect(lightThemeButton.querySelector(".sidebar-label")).toHaveTextContent("Тёмная тема");
 
     await userEvent.click(lightThemeButton);
     const systemThemeButton = screen.getByRole("button", { name: /использовать системную тему/i });
     expect(document.documentElement).toHaveAttribute("data-theme", "light");
     expect(window.localStorage.getItem(themeStorageKey)).toBe("light");
-    expect(systemThemeButton.querySelector(".system-theme-icon")).toBeInTheDocument();
+    expect(systemThemeButton.querySelector(".sun-icon")).toBeInTheDocument();
+    expect(systemThemeButton.querySelector(".sidebar-label")).toHaveTextContent("Светлая тема");
 
     await userEvent.click(systemThemeButton);
     expect(document.documentElement).toHaveAttribute("data-theme-preference", "system");
     expect(window.localStorage.getItem(themeStorageKey)).toBe("system");
-    expect(screen.getByRole("button", { name: /включить тёмную тему/i })).toBeInTheDocument();
+    const restoredSystemThemeButton = screen.getByRole("button", { name: /включить тёмную тему/i });
+    expect(restoredSystemThemeButton.querySelector(".system-theme-icon")).toBeInTheDocument();
+    expect(restoredSystemThemeButton.querySelector(".sidebar-label")).toHaveTextContent("Системная тема");
   });
 
   it("follows operating system theme changes in system mode", async () => {
@@ -625,7 +653,9 @@ describe("App", () => {
 
     await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
-    expect(screen.getByRole("button", { name: /включить светлую тему/i }).querySelector(".sun-icon")).toBeInTheDocument();
+    const themeButton = screen.getByRole("button", { name: /включить светлую тему/i });
+    expect(themeButton.querySelector(".moon-icon")).toBeInTheDocument();
+    expect(themeButton.querySelector(".sidebar-label")).toHaveTextContent("Тёмная тема");
   });
 
   it("shows the analyzed video preview actions and clears the URL field", async () => {
@@ -1956,6 +1986,17 @@ describe("App", () => {
     expect(screen.getByRole("tab", { name: /основное/i })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByLabelText(/использовать вход из браузера/i)).toBeInTheDocument();
     expect(screen.queryByRole("tabpanel", { name: /о программе/i })).not.toBeInTheDocument();
+  });
+
+  it("closes settings when Escape is pressed", async () => {
+    render(<App />);
+
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    expect(screen.getByRole("dialog", { name: /настройки/i })).toBeInTheDocument();
+
+    await userEvent.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: /настройки/i })).not.toBeInTheDocument();
   });
 
   it("shows and saves the sleep and tray behavior settings", async () => {
