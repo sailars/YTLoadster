@@ -3,9 +3,9 @@ set -euo pipefail
 
 # Downloads and build inputs are intentionally pinned. Nothing from this
 # directory is committed: GitHub Actions creates it on a clean macOS runner.
-readonly YTDLP_VERSION="2026.07.04"
+readonly YTDLP_VERSION="2026.08.19"
 readonly YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_macos"
-readonly YTDLP_SHA256="498bd0dae17855c599d371d68ec5bafc439a9d8640e838be25c765a9792f261b"
+readonly YTDLP_SHA256="0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
 
 readonly DENO_VERSION="2.9.3"
 readonly DENO_ARM64_SHA256="1b2972f7ceb6df28d9600eab18d423bebb9aa18db02f01d7eb37a5b501482203"

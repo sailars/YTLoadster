@@ -1,4 +1,4 @@
-import { useState, type FocusEvent, type MouseEvent } from "react";
+import { useState, type FocusEvent, type MouseEvent, type PointerEvent } from "react";
 import { useI18n } from "../lib/i18n";
 import type { ThemePreference } from "../lib/theme";
 import { PlaylistDownloadIcon } from "./PlaylistDownloadIcon";
@@ -41,9 +41,9 @@ export function Sidebar({
 }: Props) {
   const { t } = useI18n();
   const nextTheme = theme === "system" ? "dark" : theme === "dark" ? "light" : "system";
-  const themeLabel = nextTheme === "dark" ? t("sidebar.darkTheme") : nextTheme === "light" ? t("sidebar.lightTheme") : t("sidebar.systemTheme");
+  const themeLabel = theme === "dark" ? t("sidebar.darkTheme") : theme === "light" ? t("sidebar.lightTheme") : t("sidebar.systemTheme");
   const themeAriaLabel = nextTheme === "dark" ? t("theme.enableDark") : nextTheme === "light" ? t("theme.enableLight") : t("theme.enableSystem");
-  const themeIcon: IconName = nextTheme === "dark" ? "moon" : nextTheme === "light" ? "sun" : "systemTheme";
+  const themeIcon: IconName = theme === "dark" ? "moon" : theme === "light" ? "sun" : "systemTheme";
   const [pinned, setPinned] = useState(loadSidebarPinned);
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
@@ -74,6 +74,17 @@ export function Sidebar({
     }
   }
 
+  function handlePointerLeave(event: PointerEvent<HTMLElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const pointerStillInside = rect.width > 0
+      && rect.height > 0
+      && event.clientX >= rect.left
+      && event.clientX <= rect.right
+      && event.clientY >= rect.top
+      && event.clientY <= rect.bottom;
+    if (!pointerStillInside) setHovered(false);
+  }
+
   return (
     <div className="app-sidebar-rail" data-pinned={pinned || undefined} data-expanded={expanded || undefined}>
       <nav
@@ -82,7 +93,7 @@ export function Sidebar({
         data-pinned={pinned || undefined}
         data-expanded={expanded || undefined}
         onPointerEnter={() => setHovered(true)}
-        onPointerLeave={() => setHovered(false)}
+        onPointerLeave={handlePointerLeave}
         onFocus={() => setFocusWithin(true)}
         onBlur={handleBlur}
       >
