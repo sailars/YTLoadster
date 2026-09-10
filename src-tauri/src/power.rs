@@ -254,10 +254,10 @@ mod platform {
     use std::ptr::NonNull;
 
     const K_IO_RETURN_SUCCESS: i32 = 0;
+    const PREVENT_USER_IDLE_SYSTEM_SLEEP: &str = "PreventUserIdleSystemSleep";
 
     #[link(name = "IOKit", kind = "framework")]
     unsafe extern "C" {
-        static kIOPMAssertionTypePreventUserIdleSystemSleep: CFStringRef;
         fn IOPMAssertionCreateWithDescription(
             assertion_type: CFStringRef,
             name: CFStringRef,
@@ -281,11 +281,12 @@ mod platform {
             if self.assertion_id.is_some() {
                 return Ok(());
             }
+            let assertion_type = CFString::new(PREVENT_USER_IDLE_SYSTEM_SLEEP);
             let name = CFString::new("YTLoadster is downloading media");
             let mut assertion_id = 0;
             let result = unsafe {
                 IOPMAssertionCreateWithDescription(
-                    kIOPMAssertionTypePreventUserIdleSystemSleep,
+                    assertion_type.as_concrete_TypeRef(),
                     name.as_concrete_TypeRef(),
                     std::ptr::null(),
                     std::ptr::null(),
