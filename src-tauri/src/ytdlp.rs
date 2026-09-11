@@ -4,13 +4,42 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio::process::Command;
+
+#[derive(Debug, Clone, Default)]
+pub struct YtdlpRuntimeSettings {
+    custom_user_agent: Arc<Mutex<Option<String>>>,
+}
+
+impl YtdlpRuntimeSettings {
+    pub fn new(custom_user_agent: Option<String>) -> Self {
+        Self {
+            custom_user_agent: Arc::new(Mutex::new(custom_user_agent)),
+        }
+    }
+
+    pub fn custom_user_agent(&self) -> Option<String> {
+        self.custom_user_agent
+            .lock()
+            .expect("yt-dlp runtime settings mutex poisoned")
+            .clone()
+    }
+
+    pub fn set_custom_user_agent(&self, custom_user_agent: Option<String>) {
+        *self
+            .custom_user_agent
+            .lock()
+            .expect("yt-dlp runtime settings mutex poisoned") = custom_user_agent;
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaInfo {
     pub title: String,
     pub uploader: Option<String>,
+    pub original_language: Option<String>,
     pub duration: Option<u64>,
     pub webpage_url: Option<String>,
     pub thumbnail: Option<String>,
@@ -45,6 +74,7 @@ pub struct FormatOption {
     pub fps: Option<u64>,
     pub dynamic_range: Option<String>,
     pub audio_channels: Option<u8>,
+    pub bitrate_kbps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -52,6 +82,74 @@ pub struct FormatOption {
 pub enum FormatKind {
     Video,
     Audio,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistInfo {
+    pub id: String,
+    pub title: String,
+    pub uploader: Option<String>,
+    pub webpage_url: Option<String>,
+    pub thumbnail: Option<String>,
+    pub total_duration: Option<u64>,
+    pub entries: Vec<PlaylistEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistEntry {
+    pub id: String,
+    pub index: usize,
+    pub url: String,
+    pub title: String,
+    pub thumbnail: Option<String>,
+    pub duration: Option<u64>,
+    pub availability: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaylistItemState {
+    Ready,
+    RequiresAuth,
+    Unavailable,
+    TemporaryError,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProbeIssueCode {
+    AuthenticationRequired,
+    AgeRestricted,
+    PrivateVideo,
+    RemovedVideo,
+    MembershipRequired,
+    GeoRestricted,
+    Forbidden,
+    RateLimited,
+    Network,
+    MissingTool,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeIssue {
+    pub code: ProbeIssueCode,
+    pub message: String,
+    pub retryable: bool,
+    pub requires_auth: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistItemAnalysis {
+    pub entry_id: String,
+    pub state: PlaylistItemState,
+    pub media: Option<MediaInfo>,
+    pub issue: Option<ProbeIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -163,6 +261,7 @@ impl std::error::Error for YtdlpError {}
 struct RawMediaInfo {
     title: Option<String>,
     uploader: Option<String>,
+    language: Option<String>,
     duration: Option<u64>,
     webpage_url: Option<String>,
     thumbnail: Option<String>,
@@ -190,6 +289,8 @@ struct RawFormat {
     vcodec: Option<String>,
     acodec: Option<String>,
     abr: Option<f64>,
+    tbr: Option<f64>,
+    vbr: Option<f64>,
     filesize: Option<u64>,
     filesize_approx: Option<u64>,
     dynamic_range: Option<String>,
@@ -197,14 +298,144 @@ struct RawFormat {
     audio_channels: Option<u8>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RawPlaylistInfo {
+    id: Option<String>,
+    title: Option<String>,
+    uploader: Option<String>,
+    channel: Option<String>,
+    webpage_url: Option<String>,
+    thumbnail: Option<String>,
+    entries: Option<Vec<Option<RawPlaylistEntry>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPlaylistEntry {
+    id: Option<String>,
+    url: Option<String>,
+    webpage_url: Option<String>,
+    title: Option<String>,
+    thumbnail: Option<String>,
+    duration: Option<u64>,
+    playlist_index: Option<usize>,
+    availability: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProbeMode {
+    Single,
+    Playlist,
+}
+
+#[derive(Debug)]
+struct ProbeFailure {
+    message: String,
+    browser: Option<String>,
+    missing_tool: bool,
+}
+
+impl ProbeFailure {
+    fn user_message(&self) -> String {
+        if self.missing_tool {
+            return "Не удалось запустить загрузку. Проверьте целостность установки программы."
+                .to_string();
+        }
+        humanize_ytdlp_error_for_browser(&self.message, self.browser.as_deref())
+    }
+}
+
 #[tauri::command]
 pub async fn probe_url(
     url: String,
     cookie_source: Option<CookieSource>,
     app: tauri::AppHandle,
+    runtime_settings: tauri::State<'_, YtdlpRuntimeSettings>,
 ) -> Result<MediaInfo, String> {
-    let materialized_cookies = if matches!(cookie_source, Some(CookieSource::YoutubeSession)) {
-        Some(crate::auth::materialize_youtube_cookies(&app)?)
+    let json = run_json_probe(
+        url,
+        cookie_source,
+        runtime_settings.custom_user_agent(),
+        &app,
+        ProbeMode::Single,
+    )
+    .await
+    .map_err(|error| error.user_message())?;
+    parse_media_info(&json).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn probe_playlist(
+    url: String,
+    cookie_source: Option<CookieSource>,
+    app: tauri::AppHandle,
+    runtime_settings: tauri::State<'_, YtdlpRuntimeSettings>,
+) -> Result<PlaylistInfo, String> {
+    let json = run_json_probe(
+        url,
+        cookie_source,
+        runtime_settings.custom_user_agent(),
+        &app,
+        ProbeMode::Playlist,
+    )
+    .await
+    .map_err(|error| error.user_message())?;
+    parse_playlist_info(&json).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn probe_playlist_item(
+    entry_id: String,
+    url: String,
+    cookie_source: Option<CookieSource>,
+    app: tauri::AppHandle,
+    runtime_settings: tauri::State<'_, YtdlpRuntimeSettings>,
+) -> Result<PlaylistItemAnalysis, String> {
+    Ok(
+        match run_json_probe(
+            url,
+            cookie_source,
+            runtime_settings.custom_user_agent(),
+            &app,
+            ProbeMode::Single,
+        )
+        .await
+        {
+            Ok(json) => match parse_media_info(&json) {
+                Ok(media) => PlaylistItemAnalysis {
+                    entry_id,
+                    state: PlaylistItemState::Ready,
+                    media: Some(media),
+                    issue: None,
+                },
+                Err(error) => {
+                    let failure = ProbeFailure {
+                        message: error.to_string(),
+                        browser: None,
+                        missing_tool: false,
+                    };
+                    failed_playlist_item(entry_id, failure)
+                }
+            },
+            Err(error) => failed_playlist_item(entry_id, error),
+        },
+    )
+}
+
+async fn run_json_probe(
+    url: String,
+    cookie_source: Option<CookieSource>,
+    custom_user_agent: Option<String>,
+    app: &tauri::AppHandle,
+    mode: ProbeMode,
+) -> Result<String, ProbeFailure> {
+    let materialized_cookies = if matches!(&cookie_source, Some(CookieSource::YoutubeSession)) {
+        Some(
+            crate::auth::materialize_youtube_cookies(app).map_err(|message| ProbeFailure {
+                message,
+                browser: None,
+                missing_tool: false,
+            })?,
+        )
     } else {
         None
     };
@@ -212,44 +443,187 @@ pub async fn probe_url(
         .as_ref()
         .map(|cookies| CookieSource::File(cookies.path().to_path_buf()))
         .or(cookie_source);
+    let browser = cookie_browser_name(effective_cookie_source.as_ref()).map(str::to_string);
     let inventory = discover_tools(
         ToolConfig::default(),
-        crate::tools::ToolEnvironment::current_for_app(&app),
+        crate::tools::ToolEnvironment::current_for_app(app),
     );
     let ytdlp_path = inventory
         .ytdlp
         .path
         .as_ref()
         .filter(|_| inventory.ytdlp.state == ToolState::Found)
-        .ok_or_else(|| {
-            "Не удалось запустить загрузку. Проверьте целостность установки программы.".to_string()
+        .ok_or_else(|| ProbeFailure {
+            message: String::new(),
+            browser: browser.clone(),
+            missing_tool: true,
         })?;
     let mut args = vec![
         "--encoding".to_string(),
         "utf-8".to_string(),
         "-J".to_string(),
-        "--no-playlist".to_string(),
     ];
+    match mode {
+        ProbeMode::Single => args.push("--no-playlist".to_string()),
+        ProbeMode::Playlist => {
+            args.push("--flat-playlist".to_string());
+            args.push("--ignore-errors".to_string());
+        }
+    }
     append_js_runtime_args(&mut args, &inventory);
     append_cookie_args(&mut args, effective_cookie_source.as_ref());
+    append_custom_user_agent_args(&mut args, custom_user_agent.as_deref());
     args.push(url);
 
     let mut process = Command::new(ytdlp_path);
     process.args(&args).envs(ytdlp_process_env());
     hide_windows_console(&mut process);
 
-    let output = process.output().await.map_err(|_| {
-        "Не удалось запустить загрузку. Проверьте целостность установки программы.".to_string()
+    let output = process.output().await.map_err(|error| ProbeFailure {
+        message: error.to_string(),
+        browser: browser.clone(),
+        missing_tool: false,
     })?;
-
     if !output.status.success() {
-        return Err(humanize_ytdlp_error_for_browser(
-            String::from_utf8_lossy(&output.stderr).trim(),
-            cookie_browser_name(effective_cookie_source.as_ref()),
-        ));
+        return Err(ProbeFailure {
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            browser,
+            missing_tool: false,
+        });
     }
 
-    parse_media_info(&String::from_utf8_lossy(&output.stdout)).map_err(|err| err.to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn failed_playlist_item(entry_id: String, failure: ProbeFailure) -> PlaylistItemAnalysis {
+    let issue = classify_probe_issue(&failure);
+    let state = if issue.requires_auth {
+        PlaylistItemState::RequiresAuth
+    } else if issue.retryable {
+        PlaylistItemState::TemporaryError
+    } else if matches!(
+        issue.code,
+        ProbeIssueCode::PrivateVideo
+            | ProbeIssueCode::RemovedVideo
+            | ProbeIssueCode::MembershipRequired
+            | ProbeIssueCode::GeoRestricted
+    ) {
+        PlaylistItemState::Unavailable
+    } else {
+        PlaylistItemState::Error
+    };
+    PlaylistItemAnalysis {
+        entry_id,
+        state,
+        media: None,
+        issue: Some(issue),
+    }
+}
+
+fn classify_probe_issue(failure: &ProbeFailure) -> ProbeIssue {
+    let normalized = failure.message.to_ascii_lowercase();
+    let (code, retryable, requires_auth) = if failure.missing_tool {
+        (ProbeIssueCode::MissingTool, false, false)
+    } else if normalized.contains("confirm your age") || normalized.contains("age-restricted") {
+        (ProbeIssueCode::AgeRestricted, false, true)
+    } else if normalized.contains("members-only")
+        || normalized.contains("members only")
+        || normalized.contains("join this channel")
+        || normalized.contains("subscriber-only")
+        || normalized.contains("premium-only")
+    {
+        (ProbeIssueCode::MembershipRequired, false, false)
+    } else if normalized.contains("private video") || normalized.contains("this video is private") {
+        (ProbeIssueCode::PrivateVideo, false, true)
+    } else if normalized.contains("not available in your country")
+        || normalized.contains("geo-restricted")
+        || normalized.contains("geographic restriction")
+    {
+        (ProbeIssueCode::GeoRestricted, false, false)
+    } else if normalized.contains("video unavailable")
+        || normalized.contains("has been removed")
+        || normalized.contains("deleted video")
+    {
+        (ProbeIssueCode::RemovedVideo, false, false)
+    } else if normalized.contains("http error 429") || normalized.contains("too many requests") {
+        (ProbeIssueCode::RateLimited, true, false)
+    } else if normalized.contains("http error 403") || normalized.contains("403: forbidden") {
+        (ProbeIssueCode::Forbidden, true, false)
+    } else if normalized.contains("sign in")
+        || normalized.contains("login required")
+        || normalized.contains("cookies")
+    {
+        (ProbeIssueCode::AuthenticationRequired, false, true)
+    } else if normalized.contains("timed out")
+        || normalized.contains("timeout")
+        || normalized.contains("connection")
+        || normalized.contains("network")
+        || normalized.contains("name resolution")
+        || normalized.contains("dns")
+    {
+        (ProbeIssueCode::Network, true, false)
+    } else {
+        (ProbeIssueCode::Unknown, false, false)
+    };
+    ProbeIssue {
+        code,
+        message: failure.user_message(),
+        retryable,
+        requires_auth,
+    }
+}
+
+pub fn parse_playlist_info(json: &str) -> Result<PlaylistInfo, YtdlpError> {
+    let raw: RawPlaylistInfo =
+        serde_json::from_str(json).map_err(|error| YtdlpError::Json(error.to_string()))?;
+    let entries = raw
+        .entries
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(offset, entry)| {
+            let id = entry.id.clone().or_else(|| entry.url.clone())?;
+            let url = playlist_entry_url(entry.webpage_url.or(entry.url), &id);
+            Some(PlaylistEntry {
+                id: id.clone(),
+                index: entry.playlist_index.unwrap_or(offset + 1),
+                url,
+                title: entry
+                    .title
+                    .unwrap_or_else(|| format!("Видео {}", offset + 1)),
+                thumbnail: entry.thumbnail,
+                duration: entry.duration,
+                availability: entry.availability,
+            })
+        })
+        .collect::<Vec<_>>();
+    let total_duration = entries
+        .iter()
+        .map(|entry| entry.duration)
+        .collect::<Option<Vec<_>>>()
+        .map(|durations| durations.into_iter().sum());
+    let thumbnail = raw
+        .thumbnail
+        .or_else(|| entries.iter().find_map(|entry| entry.thumbnail.clone()));
+    Ok(PlaylistInfo {
+        id: raw.id.unwrap_or_else(|| "playlist".to_string()),
+        title: raw.title.unwrap_or_else(|| "YouTube playlist".to_string()),
+        uploader: raw.uploader.or(raw.channel),
+        webpage_url: raw.webpage_url,
+        thumbnail,
+        total_duration,
+        entries,
+    })
+}
+
+fn playlist_entry_url(candidate: Option<String>, id: &str) -> String {
+    let candidate = candidate.unwrap_or_else(|| id.to_string());
+    if candidate.starts_with("https://") || candidate.starts_with("http://") {
+        candidate
+    } else {
+        format!("https://www.youtube.com/watch?v={candidate}")
+    }
 }
 
 pub fn parse_media_info(json: &str) -> Result<MediaInfo, YtdlpError> {
@@ -273,6 +647,7 @@ pub fn parse_media_info(json: &str) -> Result<MediaInfo, YtdlpError> {
     Ok(MediaInfo {
         title: raw.title.unwrap_or_else(|| "Untitled video".to_string()),
         uploader: raw.uploader,
+        original_language: raw.language,
         duration: raw.duration,
         webpage_url: raw.webpage_url,
         thumbnail: raw.thumbnail,
@@ -637,6 +1012,17 @@ fn append_cookie_args(args: &mut Vec<String>, cookie_source: Option<&CookieSourc
     }
 }
 
+pub(crate) fn append_custom_user_agent_args(
+    args: &mut Vec<String>,
+    custom_user_agent: Option<&str>,
+) {
+    let Some(custom_user_agent) = custom_user_agent.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    args.push("--user-agent".to_string());
+    args.push(custom_user_agent.to_string());
+}
+
 fn browser_cookie_argument(browser: &str, profile: Option<&str>) -> String {
     if browser.eq_ignore_ascii_case("librewolf") {
         let profile = profile.map(str::to_string).or_else(|| {
@@ -739,6 +1125,11 @@ fn video_format_option(format: &RawFormat) -> Option<FormatOption> {
         fps,
         dynamic_range,
         audio_channels: None,
+        bitrate_kbps: format
+            .vbr
+            .or(format.tbr)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| value.round() as u64),
     })
 }
 
@@ -768,6 +1159,11 @@ fn audio_format_option(format: &RawFormat) -> Option<FormatOption> {
         fps: None,
         dynamic_range: None,
         audio_channels: format.audio_channels,
+        bitrate_kbps: format
+            .abr
+            .or(format.tbr)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| value.round() as u64),
     })
 }
 
@@ -1027,6 +1423,19 @@ fn format_number(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appends_custom_user_agent_only_when_configured() {
+        let mut args = vec!["-J".to_string()];
+        append_custom_user_agent_args(&mut args, None);
+        assert_eq!(args, vec!["-J"]);
+
+        append_custom_user_agent_args(&mut args, Some("Mozilla/5.0 TestBrowser/1.0"));
+        assert_eq!(
+            args,
+            vec!["-J", "--user-agent", "Mozilla/5.0 TestBrowser/1.0"]
+        );
+    }
     use crate::tools::{ToolInventory, ToolState, ToolStatus};
     use std::path::PathBuf;
 
@@ -1111,6 +1520,136 @@ mod tests {
         assert_eq!(media.audio_formats[0].quality_label, "128kbps M4A AAC");
         assert_eq!(media.audio_formats[0].kind, FormatKind::Audio);
         assert_eq!(media.audio_formats[0].audio_channels, Some(1));
+    }
+
+    #[test]
+    fn parses_flat_playlist_with_unavailable_entries_and_missing_values() {
+        let json = r#"{
+          "id":"PL-test",
+          "title":"Test playlist",
+          "channel":"Test channel",
+          "webpage_url":"https://youtube.com/playlist?list=PL-test",
+          "entries":[
+            {"id":"first","title":"First","duration":90,"playlist_index":1},
+            {"id":"private","title":"Private video","availability":"private","playlist_index":2},
+            null,
+            {"url":"removed","availability":"needs_auth","playlist_index":4}
+          ]
+        }"#;
+
+        let playlist = parse_playlist_info(json).unwrap();
+
+        assert_eq!(playlist.id, "PL-test");
+        assert_eq!(playlist.uploader, Some("Test channel".to_string()));
+        assert_eq!(playlist.entries.len(), 3);
+        assert_eq!(
+            playlist.entries[0].url,
+            "https://www.youtube.com/watch?v=first"
+        );
+        assert_eq!(playlist.entries[1].availability.as_deref(), Some("private"));
+        assert_eq!(playlist.entries[2].index, 4);
+        assert_eq!(playlist.entries[2].title, "Видео 3");
+        assert_eq!(playlist.total_duration, None);
+    }
+
+    #[test]
+    fn parses_an_empty_flat_playlist() {
+        let playlist =
+            parse_playlist_info(r#"{"id":"empty","title":"Empty","entries":[]}"#).unwrap();
+
+        assert!(playlist.entries.is_empty());
+        assert_eq!(playlist.total_duration, Some(0));
+    }
+
+    #[test]
+    fn classifies_playlist_probe_failures_with_machine_codes() {
+        let cases = [
+            (
+                "Sign in to confirm your age",
+                ProbeIssueCode::AgeRestricted,
+                false,
+                true,
+            ),
+            (
+                "This is a private video",
+                ProbeIssueCode::PrivateVideo,
+                false,
+                true,
+            ),
+            (
+                "This video has been removed",
+                ProbeIssueCode::RemovedVideo,
+                false,
+                false,
+            ),
+            (
+                "This is a members-only video",
+                ProbeIssueCode::MembershipRequired,
+                false,
+                false,
+            ),
+            (
+                "This video is not available in your country",
+                ProbeIssueCode::GeoRestricted,
+                false,
+                false,
+            ),
+            (
+                "HTTP Error 403: Forbidden",
+                ProbeIssueCode::Forbidden,
+                true,
+                false,
+            ),
+            (
+                "HTTP Error 429: Too Many Requests",
+                ProbeIssueCode::RateLimited,
+                true,
+                false,
+            ),
+            ("Connection timed out", ProbeIssueCode::Network, true, false),
+            (
+                "Unexpected extractor failure",
+                ProbeIssueCode::Unknown,
+                false,
+                false,
+            ),
+        ];
+
+        for (message, code, retryable, requires_auth) in cases {
+            let issue = classify_probe_issue(&ProbeFailure {
+                message: message.to_string(),
+                browser: None,
+                missing_tool: false,
+            });
+            assert_eq!(issue.code, code, "message: {message}");
+            assert_eq!(issue.retryable, retryable, "message: {message}");
+            assert_eq!(issue.requires_auth, requires_auth, "message: {message}");
+        }
+
+        let missing_tool = classify_probe_issue(&ProbeFailure {
+            message: String::new(),
+            browser: None,
+            missing_tool: true,
+        });
+        assert_eq!(missing_tool.code, ProbeIssueCode::MissingTool);
+    }
+
+    #[test]
+    fn treats_membership_restrictions_as_unavailable_instead_of_sign_in_required() {
+        let result = failed_playlist_item(
+            "member-item".to_string(),
+            ProbeFailure {
+                message: "This is a members-only video".to_string(),
+                browser: None,
+                missing_tool: false,
+            },
+        );
+
+        assert_eq!(result.state, PlaylistItemState::Unavailable);
+        assert_eq!(
+            result.issue.map(|issue| issue.code),
+            Some(ProbeIssueCode::MembershipRequired)
+        );
     }
 
     #[test]

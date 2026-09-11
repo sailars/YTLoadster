@@ -13,26 +13,19 @@ type Props = {
   onManualFormatChange: (formatId: string | null) => void;
 };
 
-const profiles: VideoDownloadProfile[] = ["best", "mp4-1080", "mp4-720", "mp4-480", "mp4-360", "universal", "phone", "tablet", "smart-tv", "legacy"];
+export const selectableVideoProfiles: VideoDownloadProfile[] = ["best", "mp4-1080", "mp4-720", "mp4-480", "mp4-360", "universal", "phone", "tablet", "smart-tv", "legacy"];
 
 export function VideoDownloadOptions({ formats, audioFormats, profile, onProfileChange, onManualFormatChange }: Props) {
   const { t } = useI18n();
   const [filters, setFilters] = useState<VideoSelection>({ height: "all", fps: "all", ext: "all", codec: "all" });
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
-  const profileResults = useMemo(() => new Map(profiles.map((item) => [item, resolveVideoProfile(item, formats, audioFormats)])), [formats, audioFormats]);
+  const profileResults = useMemo(() => new Map(selectableVideoProfiles.map((item) => [item, resolveVideoProfile(item, formats, audioFormats)])), [formats, audioFormats]);
   const options = videoFilterOptions(formats);
   const commonResolutions = commonResolutionOptions(t);
 
   useEffect(() => { setFilters({ height: "all", fps: "all", ext: "all", codec: "all" }); }, [formats]);
 
-  const profileOptions: ParameterSelectOption[] = profiles.map((item) => {
-    const result = profileResults.get(item)!;
-    const group = item === "best" || item.startsWith("mp4-") ? t("video.qualityProfiles") : t("video.deviceProfiles");
-    const label = item === "best" ? t("video.best") : t(`video.profile.${item}` as Parameters<typeof t>[0]);
-    const description = item === "best" ? t("video.bestDescription") : profileDescription(item, t);
-    const reason = result.unavailableReason ? t(`video.unavailable.${result.unavailableReason}` as Parameters<typeof t>[0]) : undefined;
-    return { value: item, label, description, group, icon: item === "best" ? <SparklesIcon /> : item.startsWith("mp4-") ? <DisplayIcon /> : undefined, disabled: formats.length > 0 && !result.available && profile !== item, disabledReason: reason };
-  });
+  const profileOptions = createVideoProfileOptions(t, profileResults, formats.length > 0, profile);
 
   function chooseProfile(value: string) {
     const next = value as VideoDownloadProfile;
@@ -45,6 +38,10 @@ export function VideoDownloadOptions({ formats, audioFormats, profile, onProfile
     const formatId = selectFormatForFilters(formats, next);
     if (!formatId) return;
     setFilters(next);
+    if (profile === "custom" && Object.values(next).every((value) => value === "all")) {
+      onProfileChange("best", profileResults.get("best") ?? resolveVideoProfile("best", formats, audioFormats));
+      return;
+    }
     onManualFormatChange(formatId);
   }
 
@@ -64,6 +61,30 @@ export function VideoDownloadOptions({ formats, audioFormats, profile, onProfile
       </div> : null}
     </section>
   </div>;
+}
+
+export function createVideoProfileOptions(
+  t: ReturnType<typeof useI18n>["t"],
+  results?: Map<VideoDownloadProfile, ResolvedVideoProfile>,
+  hasFormats = false,
+  currentProfile: VideoDownloadProfile = "best",
+): ParameterSelectOption[] {
+  return selectableVideoProfiles.map((item) => {
+    const result = results?.get(item);
+    const group = item === "best" || item.startsWith("mp4-") ? t("video.qualityProfiles") : t("video.deviceProfiles");
+    const label = item === "best" ? t("video.best") : t(`video.profile.${item}` as Parameters<typeof t>[0]);
+    const description = item === "best" ? t("video.bestDescription") : profileDescription(item, t);
+    const reason = result?.unavailableReason ? t(`video.unavailable.${result.unavailableReason}` as Parameters<typeof t>[0]) : undefined;
+    return {
+      value: item,
+      label,
+      description,
+      group,
+      icon: item === "best" ? <SparklesIcon /> : item.startsWith("mp4-") ? <DisplayIcon /> : undefined,
+      disabled: Boolean(hasFormats && result && !result.available && currentProfile !== item),
+      disabledReason: reason,
+    };
+  });
 }
 
 function Field({ label, value, values, onChange }: { label: string; value: string; values: ParameterSelectOption[]; onChange: (value: string) => void }) { return <label><span>{label}</span><ParameterSelect label={label} value={value} options={values} onChange={onChange} /></label>; }
