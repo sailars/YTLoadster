@@ -1,14 +1,17 @@
+use crate::power::SleepInhibitor;
+use crate::storage::{HistoryItem, Storage};
 use crate::tools::{discover_tools, ToolConfig, ToolState};
 use crate::ytdlp::{
-    build_download_args, hide_windows_console, humanize_ytdlp_error_for_browser, ytdlp_process_env,
-    ytdlp_process_path, CookieSource, DownloadPreset, DownloadRequest,
+    append_custom_user_agent_args, build_download_args, hide_windows_console,
+    humanize_ytdlp_error_for_browser, ytdlp_process_env, ytdlp_process_path, CookieSource,
+    DownloadPreset, DownloadRequest, YtdlpRuntimeSettings,
 };
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -19,6 +22,12 @@ pub const DUPLICATE_AUDIO_ERROR: &str = "enqueue-error:duplicate-audio";
 pub const DUPLICATE_SUBTITLES_ERROR: &str = "enqueue-error:duplicate-subtitles";
 const OUTPUT_PATH_PREFIX: &str = "YTLOADSTER_OUTPUT|";
 const MAX_OUTPUT_FILENAME_BYTES: usize = 240;
+pub const DEFAULT_DOWNLOAD_RETRIES: u8 = 10;
+pub const DEFAULT_FILE_ACCESS_RETRIES: u8 = 3;
+pub const DEFAULT_FRAGMENT_RETRIES: u8 = 10;
+pub const MAX_DOWNLOAD_RETRIES: u8 = 30;
+pub const MAX_FILE_ACCESS_RETRIES: u8 = 10;
+pub const MAX_FRAGMENT_RETRIES: u8 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum JobState {
@@ -44,6 +53,7 @@ pub enum JobPhase {
 pub struct Job {
     pub id: u64,
     pub request: DownloadRequest,
+    pub media_signature: Option<String>,
     pub state: JobState,
     pub phase: Option<JobPhase>,
     pub progress_percent: Option<u8>,
@@ -60,6 +70,43 @@ pub struct DownloadProgress {
     pub phase: Option<JobPhase>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchDownloadItem {
+    pub client_id: String,
+    pub request: DownloadRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchEnqueuedItem {
+    pub client_id: String,
+    pub job: Job,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchRejection {
+    pub client_id: String,
+    pub code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchEnqueueResult {
+    pub queued: Vec<BatchEnqueuedItem>,
+    pub rejected: Vec<BatchRejection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadFinishedEvent {
+    pub job: Job,
+    pub history: Option<HistoryItem>,
+    pub output_path: PathBuf,
+    pub history_error: Option<String>,
+}
+
 #[derive(Debug, Default)]
 struct DownloadState {
     next_id: u64,
@@ -67,6 +114,16 @@ struct DownloadState {
     active_downloads: HashMap<u64, ActiveDownload>,
     concurrency: u8,
     fragment_concurrency: u8,
+    download_retries: u8,
+    file_access_retries: u8,
+    fragment_retries: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DownloadRetrySettings {
+    download_retries: u8,
+    file_access_retries: u8,
+    fragment_retries: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +155,9 @@ impl DownloadManager {
                 active_downloads: HashMap::new(),
                 concurrency: normalize_concurrency(concurrency),
                 fragment_concurrency: normalize_fragment_concurrency(fragment_concurrency),
+                download_retries: DEFAULT_DOWNLOAD_RETRIES,
+                file_access_retries: DEFAULT_FILE_ACCESS_RETRIES,
+                fragment_retries: DEFAULT_FRAGMENT_RETRIES,
             })),
         }
     }
@@ -108,6 +168,27 @@ impl DownloadManager {
             return Err(error.to_string());
         }
         Ok(push_job(&mut state, request))
+    }
+
+    pub fn try_enqueue_batch(&self, items: Vec<BatchDownloadItem>) -> BatchEnqueueResult {
+        let mut state = self.inner.lock().expect("download state mutex poisoned");
+        let mut queued = Vec::new();
+        let mut rejected = Vec::new();
+        for item in items {
+            if let Some(code) = duplicate_error_for_request(&state.jobs, &item.request, None) {
+                rejected.push(BatchRejection {
+                    client_id: item.client_id,
+                    code: code.to_string(),
+                });
+                continue;
+            }
+            let job = push_job(&mut state, item.request);
+            queued.push(BatchEnqueuedItem {
+                client_id: item.client_id,
+                job,
+            });
+        }
+        BatchEnqueueResult { queued, rejected }
     }
 
     #[cfg(test)]
@@ -274,6 +355,45 @@ impl DownloadManager {
         Ok(cancelled)
     }
 
+    pub fn shutdown(&self) {
+        let (active_downloads, cache_dirs) = {
+            let mut state = self.inner.lock().expect("download state mutex poisoned");
+            let active_downloads = state.active_downloads.values().cloned().collect::<Vec<_>>();
+            let cache_dirs = state
+                .jobs
+                .iter()
+                .filter(|job| {
+                    matches!(
+                        job.state,
+                        JobState::Pending | JobState::Running | JobState::Paused
+                    )
+                })
+                .map(|job| partial_cache_dir(&job.request.destination_dir, job.id))
+                .collect::<Vec<_>>();
+            for job in state.jobs.iter_mut() {
+                if matches!(
+                    job.state,
+                    JobState::Pending | JobState::Running | JobState::Paused
+                ) {
+                    job.state = JobState::Cancelled;
+                    job.phase = None;
+                    job.progress_percent = None;
+                    job.speed = None;
+                    job.eta = None;
+                    job.error = None;
+                }
+            }
+            (active_downloads, cache_dirs)
+        };
+
+        for active in active_downloads {
+            let _ = kill_process_tree(active.pid);
+        }
+        for cache_dir in cache_dirs {
+            let _ = fs::remove_dir_all(cache_dir);
+        }
+    }
+
     pub fn retry(&self, id: u64) -> Result<Job, String> {
         let mut state = self.inner.lock().expect("download state mutex poisoned");
         let index = state
@@ -295,6 +415,7 @@ impl DownloadManager {
         state.jobs.remove(index);
         let job = Job {
             id: state.next_id,
+            media_signature: media_signature(&request),
             request,
             state: JobState::Pending,
             phase: None,
@@ -339,12 +460,9 @@ impl DownloadManager {
 
     pub fn clear(&self) -> Result<(), String> {
         let mut state = self.inner.lock().expect("download state mutex poisoned");
-        state.jobs.retain(|job| {
-            !matches!(
-                job.state,
-                JobState::Completed | JobState::Failed | JobState::Cancelled
-            )
-        });
+        state
+            .jobs
+            .retain(|job| !matches!(job.state, JobState::Failed | JobState::Cancelled));
         Ok(())
     }
 
@@ -382,11 +500,32 @@ impl DownloadManager {
             .fragment_concurrency = normalize_fragment_concurrency(fragment_concurrency);
     }
 
+    pub fn set_retry_settings(
+        &self,
+        download_retries: u8,
+        file_access_retries: u8,
+        fragment_retries: u8,
+    ) {
+        let mut state = self.inner.lock().expect("download state mutex poisoned");
+        state.download_retries = normalize_download_retries(download_retries);
+        state.file_access_retries = normalize_file_access_retries(file_access_retries);
+        state.fragment_retries = normalize_fragment_retries(fragment_retries);
+    }
+
     fn fragment_concurrency(&self) -> u8 {
         self.inner
             .lock()
             .expect("download state mutex poisoned")
             .fragment_concurrency
+    }
+
+    fn retry_settings(&self) -> DownloadRetrySettings {
+        let state = self.inner.lock().expect("download state mutex poisoned");
+        DownloadRetrySettings {
+            download_retries: state.download_retries,
+            file_access_retries: state.file_access_retries,
+            fragment_retries: state.fragment_retries,
+        }
     }
 
     pub fn mark_running(&self, id: u64) -> Result<Job, String> {
@@ -551,7 +690,7 @@ impl DownloadManager {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 struct VideoJobSignature {
     canonical_source: String,
     video_format_id: Option<String>,
@@ -559,7 +698,7 @@ struct VideoJobSignature {
     requested_container: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 struct AudioJobSignature {
     canonical_source: String,
     audio_format_id: Option<String>,
@@ -570,7 +709,7 @@ struct AudioJobSignature {
     embed_thumbnail: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 struct SubtitleJobSignature {
     canonical_source: String,
     language: String,
@@ -578,7 +717,7 @@ struct SubtitleJobSignature {
     automatic: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 enum MediaJobSignature {
     Video(VideoJobSignature),
     Audio(AudioJobSignature),
@@ -657,6 +796,10 @@ fn media_job_signature(request: &DownloadRequest) -> Option<MediaJobSignature> {
     subtitle_job_signature(request).map(MediaJobSignature::Subtitles)
 }
 
+pub fn media_signature(request: &DownloadRequest) -> Option<String> {
+    media_job_signature(request).and_then(|signature| serde_json::to_string(&signature).ok())
+}
+
 fn canonical_source(request: &DownloadRequest) -> String {
     normalized_text(Some(
         request.canonical_source.as_deref().unwrap_or(&request.url),
@@ -700,6 +843,7 @@ fn duplicate_error_for_request(
 fn push_job(state: &mut DownloadState, request: DownloadRequest) -> Job {
     let job = Job {
         id: state.next_id,
+        media_signature: media_signature(&request),
         request,
         state: JobState::Pending,
         phase: None,
@@ -727,6 +871,17 @@ pub fn enqueue_download(
         .into_iter()
         .find(|current| current.id == job.id)
         .unwrap_or(job))
+}
+
+#[tauri::command]
+pub fn enqueue_download_batch(
+    items: Vec<BatchDownloadItem>,
+    manager: State<'_, DownloadManager>,
+    app: AppHandle,
+) -> BatchEnqueueResult {
+    let result = manager.try_enqueue_batch(items);
+    schedule_pending_downloads(manager.inner().clone(), app);
+    result
 }
 
 #[tauri::command]
@@ -823,11 +978,17 @@ pub fn remove_job(id: u64, manager: State<'_, DownloadManager>) -> Result<(), St
 
 #[tauri::command]
 pub fn open_download_folder(path: PathBuf) -> Result<(), String> {
-    if !path.is_dir() {
+    let folder = if path.is_dir() {
+        path
+    } else if path.is_file() {
+        path.parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| format!("папка не найдена: {}", path.display()))?
+    } else {
         return Err(format!("папка не найдена: {}", path.display()));
-    }
+    };
 
-    let (program, args) = open_folder_command(&path);
+    let (program, args) = open_folder_command(&folder);
     std::process::Command::new(program)
         .args(args)
         .spawn()
@@ -866,12 +1027,25 @@ pub fn normalize_fragment_concurrency(fragment_concurrency: u8) -> u8 {
     }
 }
 
+pub fn normalize_download_retries(value: u8) -> u8 {
+    value.min(MAX_DOWNLOAD_RETRIES)
+}
+
+pub fn normalize_file_access_retries(value: u8) -> u8 {
+    value.min(MAX_FILE_ACCESS_RETRIES)
+}
+
+pub fn normalize_fragment_retries(value: u8) -> u8 {
+    value.min(MAX_FRAGMENT_RETRIES)
+}
+
 async fn run_download(
     job_id: u64,
     request: DownloadRequest,
     manager: DownloadManager,
     app: AppHandle,
 ) {
+    let _sleep_guard = app.state::<SleepInhibitor>().begin_download();
     let materialized_cookies =
         if matches!(request.cookie_source, Some(CookieSource::YoutubeSession)) {
             match crate::auth::materialize_youtube_cookies(&app) {
@@ -952,6 +1126,12 @@ async fn run_download(
     add_output_tracking_args(&mut args);
     add_fragment_concurrency_args(&mut args, manager.fragment_concurrency());
     add_temp_path_args(&mut args, &temp_dir);
+    let custom_user_agent = app.state::<YtdlpRuntimeSettings>().custom_user_agent();
+    add_download_runtime_args(
+        &mut args,
+        manager.retry_settings(),
+        custom_user_agent.as_deref(),
+    );
     let mut process = Command::new(ytdlp_path);
     process
         .args(args)
@@ -1053,11 +1233,49 @@ async fn run_download(
             let finalized = resolve_output_file(output_path.as_deref(), &output_dir, &request)
                 .and_then(|source| {
                     finalize_output_without_overwrite(&source, &request.destination_dir, &request)
-                        .map(|_| ())
                 });
 
             match finalized {
-                Ok(()) => emit_job(&app, manager.mark_completed(job_id)),
+                Ok(final_output_path) => match manager.mark_completed(job_id) {
+                    Ok(job) => {
+                        let storage = app.state::<Storage>();
+                        let first_attempt =
+                            storage.record_completed_download(job_id, &request, &final_output_path);
+                        let history_result = match first_attempt {
+                            Ok(history) => Ok(history),
+                            Err(first_error) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                storage
+                                    .record_completed_download(job_id, &request, &final_output_path)
+                                    .map_err(|second_error| format!(
+                                        "{first_error}; repeated history write failed: {second_error}"
+                                    ))
+                            }
+                        };
+                        let (history, history_error) = match history_result {
+                            Ok(history) => (Some(history), None),
+                            Err(error) => {
+                                eprintln!(
+                                    "completed download {job_id} was not written to history: {error}"
+                                );
+                                (None, Some("history-error:write-failed".to_string()))
+                            }
+                        };
+                        let _ = manager.remove(job_id);
+                        emit_download_finished(
+                            &app,
+                            DownloadFinishedEvent {
+                                job,
+                                history,
+                                output_path: final_output_path,
+                                history_error,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("completed download {job_id} could not change state: {error}");
+                    }
+                },
                 Err(error) => emit_job(&app, manager.mark_failed(job_id, error)),
             }
             let _ = fs::remove_dir_all(&cache_dir);
@@ -1181,11 +1399,11 @@ fn resolve_output_file(
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
         .filter(|path| output_extension_matches(path, expected_extension.as_deref()))
+        .filter(|path| !is_ytdlp_format_sidecar(path))
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
-        is_ytdlp_format_sidecar(left)
-            .cmp(&is_ytdlp_format_sidecar(right))
-            .then_with(|| output_file_size(right).cmp(&output_file_size(left)))
+        output_file_size(right)
+            .cmp(&output_file_size(left))
             .then_with(|| left.cmp(right))
     });
     candidates
@@ -1215,11 +1433,11 @@ fn output_file_size(path: &Path) -> u64 {
 fn expected_output_extension(request: &DownloadRequest) -> Option<String> {
     match request.preset {
         DownloadPreset::Mp4Video => Some("mp4".to_string()),
-        DownloadPreset::BestVideo => request
-            .video_technical_details
-            .as_ref()
-            .and_then(|details| normalized_text(details.requested_container.as_deref()))
-            .map(|extension| extension.to_ascii_lowercase()),
+        DownloadPreset::BestVideo => {
+            // The best video stream's container is not necessarily the final one.
+            // For example, yt-dlp merges MP4/H.264 video with WebM/Opus audio into MKV.
+            None
+        }
         DownloadPreset::AudioMp3 => Some("mp3".to_string()),
         DownloadPreset::AudioM4a => Some("m4a".to_string()),
         DownloadPreset::AudioOpus => Some("opus".to_string()),
@@ -1405,6 +1623,24 @@ fn add_fragment_concurrency_args(args: &mut Vec<String>, fragment_concurrency: u
     args.push(url);
 }
 
+fn add_download_runtime_args(
+    args: &mut Vec<String>,
+    retry_settings: DownloadRetrySettings,
+    custom_user_agent: Option<&str>,
+) {
+    let Some(url) = args.pop() else {
+        return;
+    };
+    args.push("--retries".to_string());
+    args.push(retry_settings.download_retries.to_string());
+    args.push("--file-access-retries".to_string());
+    args.push(retry_settings.file_access_retries.to_string());
+    args.push("--fragment-retries".to_string());
+    args.push(retry_settings.fragment_retries.to_string());
+    append_custom_user_agent_args(args, custom_user_agent);
+    args.push(url);
+}
+
 fn cleanup_cancelled_download(
     active: &ActiveDownload,
     remove_destination_part_files: bool,
@@ -1459,6 +1695,10 @@ fn emit_job(app: &AppHandle, result: Result<Job, String>) {
     if let Ok(job) = result {
         let _ = app.emit("download-updated", job);
     }
+}
+
+fn emit_download_finished(app: &AppHandle, event: DownloadFinishedEvent) {
+    let _ = app.emit("download-finished", event);
 }
 
 async fn read_process_line<R: AsyncBufRead + Unpin>(
@@ -1859,7 +2099,7 @@ mod tests {
     }
 
     #[test]
-    fn clearing_completed_video_allows_a_new_numbered_attempt() {
+    fn removing_completed_video_after_finalization_allows_a_new_numbered_attempt() {
         let manager = DownloadManager::new();
         let first = manager.try_enqueue(sample_download_request()).unwrap();
         manager.mark_completed(first.id).unwrap();
@@ -1868,8 +2108,40 @@ mod tests {
             DUPLICATE_VIDEO_ERROR
         );
 
-        manager.clear().unwrap();
+        manager.remove(first.id).unwrap();
         assert!(manager.try_enqueue(sample_download_request()).is_ok());
+    }
+
+    #[test]
+    fn batch_enqueue_is_partial_and_detects_duplicates_inside_the_batch() {
+        let manager = DownloadManager::new();
+        let original = sample_download_request();
+        let mut distinct = sample_download_request();
+        distinct.canonical_source = Some("video:second".to_string());
+        distinct.url = "https://www.youtube.com/watch?v=second".to_string();
+
+        let result = manager.try_enqueue_batch(vec![
+            BatchDownloadItem {
+                client_id: "first".to_string(),
+                request: original.clone(),
+            },
+            BatchDownloadItem {
+                client_id: "duplicate".to_string(),
+                request: original,
+            },
+            BatchDownloadItem {
+                client_id: "second".to_string(),
+                request: distinct,
+            },
+        ]);
+
+        assert_eq!(result.queued.len(), 2);
+        assert_eq!(result.queued[0].client_id, "first");
+        assert_eq!(result.queued[1].client_id, "second");
+        assert_eq!(result.rejected.len(), 1);
+        assert_eq!(result.rejected[0].client_id, "duplicate");
+        assert_eq!(result.rejected[0].code, DUPLICATE_VIDEO_ERROR);
+        assert_eq!(manager.jobs().len(), 2);
     }
 
     #[test]
@@ -1890,6 +2162,43 @@ mod tests {
             Some("https://i.ytimg.com/example.jpg")
         );
         assert_eq!(manager.jobs(), vec![retry]);
+    }
+
+    #[test]
+    fn shutdown_cancels_only_unfinished_jobs() {
+        let manager = DownloadManager::new();
+        let pending = manager.enqueue(sample_download_request());
+        let running = manager.enqueue(sample_download_request());
+        let paused = manager.enqueue(sample_download_request());
+        let completed = manager.enqueue(sample_download_request());
+        let failed = manager.enqueue(sample_download_request());
+        let cancelled = manager.enqueue(sample_download_request());
+
+        manager.mark_running(running.id).unwrap();
+        manager
+            .update_job(paused.id, |job| job.state = JobState::Paused)
+            .unwrap();
+        manager.mark_completed(completed.id).unwrap();
+        manager
+            .mark_failed(failed.id, "network error".to_string())
+            .unwrap();
+        manager
+            .update_job(cancelled.id, |job| job.state = JobState::Cancelled)
+            .unwrap();
+
+        manager.shutdown();
+
+        let states = manager
+            .jobs()
+            .into_iter()
+            .map(|job| (job.id, job.state))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(states[&pending.id], JobState::Cancelled);
+        assert_eq!(states[&running.id], JobState::Cancelled);
+        assert_eq!(states[&paused.id], JobState::Cancelled);
+        assert_eq!(states[&completed.id], JobState::Completed);
+        assert_eq!(states[&failed.id], JobState::Failed);
+        assert_eq!(states[&cancelled.id], JobState::Cancelled);
     }
 
     #[test]
@@ -2207,7 +2516,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_removes_only_terminal_jobs_from_queue() {
+    fn clear_removes_only_failed_and_cancelled_jobs_from_queue() {
         let manager = DownloadManager::new();
         let completed = manager.enqueue(sample_download_request());
         let failed = manager.enqueue(sample_download_request());
@@ -2228,7 +2537,7 @@ mod tests {
 
         assert_eq!(
             manager.jobs().iter().map(|job| job.id).collect::<Vec<_>>(),
-            vec![running.id, paused.id]
+            vec![completed.id, running.id, paused.id]
         );
     }
 
@@ -2388,6 +2697,50 @@ mod tests {
     }
 
     #[test]
+    fn retry_and_user_agent_args_are_inserted_before_url() {
+        let mut args = vec![
+            "-o".to_string(),
+            "%(title)s.%(ext)s".to_string(),
+            "https://youtube.com/watch?v=x".to_string(),
+        ];
+
+        add_download_runtime_args(
+            &mut args,
+            DownloadRetrySettings {
+                download_retries: 12,
+                file_access_retries: 4,
+                fragment_retries: 18,
+            },
+            Some("Mozilla/5.0 TestBrowser/1.0"),
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "-o",
+                "%(title)s.%(ext)s",
+                "--retries",
+                "12",
+                "--file-access-retries",
+                "4",
+                "--fragment-retries",
+                "18",
+                "--user-agent",
+                "Mozilla/5.0 TestBrowser/1.0",
+                "https://youtube.com/watch?v=x",
+            ]
+        );
+    }
+
+    #[test]
+    fn retry_counts_use_separate_practical_limits() {
+        assert_eq!(normalize_download_retries(0), 0);
+        assert_eq!(normalize_download_retries(50), 30);
+        assert_eq!(normalize_file_access_retries(50), 10);
+        assert_eq!(normalize_fragment_retries(50), 30);
+    }
+
+    #[test]
     fn simultaneous_downloads_are_limited_to_eight() {
         assert_eq!(normalize_concurrency(6), 6);
         assert_eq!(normalize_concurrency(8), 8);
@@ -2527,7 +2880,7 @@ mod tests {
     }
 
     #[test]
-    fn best_video_finalization_uses_the_selected_video_container() {
+    fn best_video_finalization_keeps_webm_output() {
         let root = unique_test_dir("best-video-output-selection");
         let output = root.join("output");
         fs::create_dir_all(&output).unwrap();
@@ -2547,6 +2900,64 @@ mod tests {
             resolve_output_file(Some(&output.join("Nature.f251.webm")), &output, &request).unwrap();
 
         assert_eq!(resolved, output.join("Nature.webm"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn best_video_finalization_accepts_actual_mkv_container() {
+        let root = unique_test_dir("best-video-mkv-output");
+        let output = root.join("output");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("Nature.f251.webm"), b"audio").unwrap();
+        fs::write(output.join("Nature.mkv"), b"video with audio").unwrap();
+        let mut request = sample_download_request();
+        request.preset = DownloadPreset::BestVideo;
+        request.video_technical_details = Some(VideoTechnicalDetails {
+            height: Some(988),
+            fps: Some(24),
+            codec: Some("H.264".to_string()),
+            dynamic_range: None,
+            requested_container: Some("mp4".to_string()),
+        });
+
+        let resolved =
+            resolve_output_file(Some(&output.join("Nature.mkv")), &output, &request).unwrap();
+
+        assert_eq!(resolved, output.join("Nature.mkv"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn best_video_workspace_scan_rejects_an_unmerged_format_sidecar() {
+        let root = unique_test_dir("best-video-sidecar-only");
+        let output = root.join("output");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("Nature.f251.webm"), b"audio").unwrap();
+        let mut request = sample_download_request();
+        request.preset = DownloadPreset::BestVideo;
+
+        let error = resolve_output_file(Some(&output.join("Nature.f251.webm")), &output, &request)
+            .unwrap_err();
+
+        assert_eq!(error, "Не удалось определить итоговый файл загрузки.");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mp4_video_finalization_stays_strict_about_its_container() {
+        let root = unique_test_dir("mp4-container-output-selection");
+        let output = root.join("output");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("Nature.mkv"), b"video with audio").unwrap();
+
+        let error = resolve_output_file(
+            Some(&output.join("Nature.mkv")),
+            &output,
+            &sample_download_request(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "Не удалось определить итоговый файл загрузки.");
         let _ = fs::remove_dir_all(root);
     }
 

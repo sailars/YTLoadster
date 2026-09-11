@@ -40,7 +40,7 @@ const profileRules: Partial<Record<VideoDownloadProfile, Rules>> = {
 export function resolveVideoProfile(profile: VideoDownloadProfile, videoFormats: FormatOption[], audioFormats: FormatOption[]): ResolvedVideoProfile {
   const video = videoFormats.filter((format) => format.kind === "video");
   if (!video.length) return unavailable(profile, "noVideo");
-  if (profile === "best") return resolved(profile, bestFormatId(video), null);
+  if (profile === "best") return resolved(profile, bestFormatId(video), bestFormatId(audioFormats));
   if (profile === "custom") return resolved(profile, bestFormatId(video), bestAudio(audioFormats)?.formatId ?? null);
 
   const rules = profileRules[profile]!;

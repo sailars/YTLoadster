@@ -62,7 +62,33 @@ export function formatCodec(format: FormatOption) {
   if (label.includes("vp9")) {
     return "VP9";
   }
+  if (label.includes("aac") || label.includes("m4a")) {
+    return "AAC";
+  }
+  if (label.includes("opus")) {
+    return "Opus";
+  }
   return "";
+}
+
+export function predictFinalVideoContainer(video?: FormatOption | null, audio?: FormatOption | null) {
+  const videoExt = video ? formatExt(video) : null;
+  if (!videoExt) {
+    return null;
+  }
+  if (!audio) {
+    return videoExt;
+  }
+
+  const audioExt = formatExt(audio);
+  const audioCodec = formatCodec(audio);
+  if (videoExt === "mp4" && (audioExt === "m4a" || audioExt === "mp4" || audioCodec === "AAC")) {
+    return "mp4";
+  }
+  if (videoExt === "webm" && (audioExt === "webm" || audioExt === "opus" || audioCodec === "Opus")) {
+    return "webm";
+  }
+  return "mkv";
 }
 
 export function videoFilterOptions(formats: FormatOption[]) {
