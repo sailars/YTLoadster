@@ -13,6 +13,8 @@ vi.mock("../lib/api", () => ({
     getAvailableDiskSpace: vi.fn().mockResolvedValue({ available: 100 * 1024 ** 3, total: 250 * 1024 ** 3 }),
     selectDownloadDir: vi.fn().mockResolvedValue("D:/Video"),
     probePlaylist: vi.fn(),
+    beginPlaylistAnalysis: vi.fn().mockResolvedValue(undefined),
+    cancelPlaylistAnalysis: vi.fn().mockResolvedValue(undefined),
     probePlaylistItem: vi.fn(),
     checkHistoryDuplicates: vi.fn().mockResolvedValue([]),
     enqueueDownloadBatch: vi.fn().mockResolvedValue({ queued: [], rejected: [] }),
@@ -145,27 +147,46 @@ describe("Playlist", () => {
     expect(maximumActive).toBe(2);
   });
 
-  it("stops and resumes without discarding analyzed rows", async () => {
+  it("shows the sixty-second network error when playlist discovery times out", async () => {
+    vi.mocked(api.probePlaylist).mockRejectedValue("analysis-error:timeout");
+
+    renderPlaylist();
+
+    expect(await screen.findByText(/не удалось проанализировать ссылку\. проверьте подключение/i)).toBeInTheDocument();
+    expect(api.probePlaylistItem).not.toHaveBeenCalled();
+  });
+
+  it("cancels in-flight probes and resumes them in a new analysis session", async () => {
     vi.mocked(api.probePlaylist).mockResolvedValue(playlistInfo(3));
-    const resolvers = new Map<string, (result: PlaylistItemAnalysis) => void>();
+    const resolvers = new Map<string, Array<(result: PlaylistItemAnalysis) => void>>();
     vi.mocked(api.probePlaylistItem).mockImplementation((entryId) => new Promise((resolve) => {
-      resolvers.set(entryId, resolve);
+      resolvers.set(entryId, [...(resolvers.get(entryId) ?? []), resolve]);
     }));
 
     renderPlaylist();
     await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledTimes(2), { timeout: 2_000 });
+    const firstSessionId = vi.mocked(api.beginPlaylistAnalysis).mock.calls[0][0];
     await userEvent.click(screen.getByRole("button", { name: "Остановить" }));
+    expect(api.cancelPlaylistAnalysis).toHaveBeenCalledWith(firstSessionId);
     await act(async () => {
-      resolvers.get("item-1")?.(ready("item-1"));
-      resolvers.get("item-2")?.(ready("item-2"));
+      resolvers.get("item-1")?.[0]?.(ready("item-1"));
+      resolvers.get("item-2")?.[0]?.(ready("item-2"));
     });
 
-    expect(await screen.findAllByText("Доступно")).toHaveLength(2);
+    expect(screen.queryByText("Доступно")).not.toBeInTheDocument();
     expect(api.probePlaylistItem).toHaveBeenCalledTimes(2);
     await userEvent.click(screen.getByRole("button", { name: "Продолжить анализ" }));
-    await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledTimes(4));
+    const beginCalls = vi.mocked(api.beginPlaylistAnalysis).mock.calls;
+    const secondSessionId = beginCalls[beginCalls.length - 1]?.[0];
+    expect(secondSessionId).not.toBe(firstSessionId);
     await act(async () => {
-      resolvers.get("item-3")?.(ready("item-3"));
+      resolvers.get("item-1")?.[1]?.(ready("item-1"));
+      resolvers.get("item-2")?.[1]?.(ready("item-2"));
+    });
+    await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledTimes(5));
+    await act(async () => {
+      resolvers.get("item-3")?.[0]?.(ready("item-3"));
     });
     expect(await screen.findAllByText("Доступно")).toHaveLength(3);
   });
@@ -205,6 +226,26 @@ describe("Playlist", () => {
     await userEvent.click(screen.getByRole("button", { name: "Продолжить" }));
     await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledTimes(4));
     await waitFor(() => expect(screen.getAllByText("Доступно")).toHaveLength(3));
+  });
+
+  it("does not start a second sixty-second attempt after an item timeout", async () => {
+    vi.mocked(api.probePlaylist).mockResolvedValue(playlistInfo(1));
+    vi.mocked(api.probePlaylistItem).mockResolvedValue({
+      entryId: "item-1",
+      state: "temporaryError",
+      issue: {
+        code: "network",
+        message: "analysis-error:timeout",
+        retryable: true,
+        requiresAuth: false,
+      },
+    });
+
+    renderPlaylist();
+
+    expect(await screen.findByText("Временная ошибка", {}, { timeout: 2_000 })).toBeInTheDocument();
+    expect(screen.getByText(/не удалось проанализировать ссылку\. проверьте подключение/i)).toBeInTheDocument();
+    expect(api.probePlaylistItem).toHaveBeenCalledTimes(1);
   });
 
   it("retries only authentication-related rows after a successful sign-in", async () => {

@@ -35,6 +35,8 @@ import type {
   YoutubeAuthStart,
   YoutubeAuthStatus,
   UpdateCheckState,
+  ComponentId,
+  ComponentUpdateCheckState,
 } from "./lib/types";
 import {
   dismissUpdateNotice,
@@ -54,7 +56,7 @@ import {
 import { getInitialBrowserAuthSettings, saveBrowserAuthSettings } from "./lib/browserAuth";
 
 type ThemeTransitionDocument = Document & {
-  startViewTransition?: (update: () => void) => unknown;
+  startViewTransition?: (update: () => void) => { finished: Promise<void> };
 };
 
 const themeTransitionDuration = "1600ms";
@@ -115,7 +117,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   const [finishedMediaSignatures, setFinishedMediaSignatures] = useState<Set<string>>(() => new Set());
   const [repeatDraft, setRepeatDraft] = useState<{ id: string; request?: HistoryItem["request"] } | null>(null);
   const [historyWriteFailurePath, setHistoryWriteFailurePath] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [defaultDestinationDir, setDefaultDestinationDir] = useState<string | null>(null);
   const [platform, setPlatform] = useState("unknown");
   const [theme, setTheme] = useState<ThemePreference>(getInitialTheme);
   const [notificationsEnabled, setNotificationsEnabled] = useState(getInitialNotificationsEnabled);
@@ -127,6 +129,12 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     const cached = loadCachedUpdateCheck(packageMetadata.version);
     return cached ? updateStateFromResult(cached) : { status: "idle" };
   });
+  const [componentUpdates, setComponentUpdates] = useState<ComponentUpdateCheckState>({
+    status: "idle",
+    results: [],
+    installingId: null,
+    installErrorId: null,
+  });
   const [updateNoticeDismissed, setUpdateNoticeDismissed] = useState(() => {
     const cached = loadCachedUpdateCheck(packageMetadata.version);
     return Boolean(
@@ -136,20 +144,33 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   const youtubeAuthPollTimer = useRef<number | null>(null);
   const automaticUpdateCheckStarted = useRef(false);
   const notificationsEnabledRef = useRef(notificationsEnabled);
+  const completionSoundEnabledRef = useRef(false);
+  const themeTransitionId = useRef(0);
+  const soundedJobs = useRef(new Set<number>());
   const localeRef = useRef(locale);
   const notifiedJobs = useRef(new Set<number>());
   const [appSettings, setAppSettings] = useState<AppSettings>({
     concurrency: 2,
     fragmentConcurrency: 1,
-    downloadRetries: 10,
+    downloadRetries: 3,
     fileAccessRetries: 3,
-    fragmentRetries: 10,
+    fragmentRetries: 3,
     customUserAgentEnabled: false,
     customUserAgent: "",
     includeVideoTechnicalDetailsInFilename: false,
+    filenameTemplate: "title",
+    filenameCollisionPolicy: "rename",
     playlistFormatSelectionMode: "strict",
     preventSystemSleepWhileDownloading: false,
     minimizeToTray: true,
+    completionSoundEnabled: false,
+    showThumbnails: true,
+    accentColor: "blue",
+    proxyMode: "system",
+    proxyHost: "",
+    proxyPort: 0,
+    proxyUsername: "",
+    proxyPasswordSet: false,
   });
   const [authSettings, setAuthSettings] = useState<BrowserAuthSettings>(getInitialBrowserAuthSettings);
   const [youtubeAuthStatus, setYoutubeAuthStatus] = useState<YoutubeAuthStatus>({
@@ -177,20 +198,33 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
       .catch(() => setPlatform("unknown"));
     api
       .getSettings()
-      .then(setAppSettings)
+      .then((settings) => { setAppSettings(settings); completionSoundEnabledRef.current = settings.completionSoundEnabled; })
       .catch(() => setAppSettings({
         concurrency: 2,
         fragmentConcurrency: 1,
-        downloadRetries: 10,
+        downloadRetries: 3,
         fileAccessRetries: 3,
-        fragmentRetries: 10,
+        fragmentRetries: 3,
         customUserAgentEnabled: false,
         customUserAgent: "",
         includeVideoTechnicalDetailsInFilename: false,
+        filenameTemplate: "title",
+        filenameCollisionPolicy: "rename",
         playlistFormatSelectionMode: "strict",
         preventSystemSleepWhileDownloading: false,
         minimizeToTray: true,
+        completionSoundEnabled: false,
+        showThumbnails: true,
+        accentColor: "blue",
+        proxyMode: "system",
+        proxyHost: "",
+        proxyPort: 0,
+        proxyUsername: "",
+        proxyPasswordSet: false,
       }));
+    api.getDefaultDownloadDir()
+      .then(setDefaultDestinationDir)
+      .catch(() => setDefaultDestinationDir("Downloads"));
     api
       .getYoutubeAuthStatus()
       .then((status) => {
@@ -225,6 +259,10 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
           }
         });
       }
+      if (updatedJob.state === "Completed" && completionSoundEnabledRef.current && !soundedJobs.current.has(updatedJob.id)) {
+        soundedJobs.current.add(updatedJob.id);
+        void api.playCompletionSound().catch(() => undefined);
+      }
     });
     const unlistenFinished = api.onDownloadFinished((event) => {
       setJobs((current) => current.filter((job) => job.id !== event.job.id));
@@ -245,6 +283,10 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             setNotificationsEnabled(false);
           }
         });
+      }
+      if (completionSoundEnabledRef.current && !soundedJobs.current.has(event.job.id)) {
+        soundedJobs.current.add(event.job.id);
+        void api.playCompletionSound().catch(() => undefined);
       }
     });
 
@@ -271,6 +313,27 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     }
   }
 
+  async function checkComponentUpdates() {
+    setComponentUpdates((current) => ({ ...current, status: "checking", installErrorId: null }));
+    try {
+      const results = await api.checkComponentUpdates();
+      setComponentUpdates((current) => ({ ...current, status: "ready", results }));
+    } catch {
+      setComponentUpdates((current) => ({ ...current, status: "error" }));
+    }
+  }
+
+  async function installComponentUpdate(id: ComponentId) {
+    setComponentUpdates((current) => ({ ...current, installingId: id, installErrorId: null }));
+    try {
+      await api.installComponentUpdate(id);
+      const results = await api.checkComponentUpdates();
+      setComponentUpdates((current) => ({ ...current, status: "ready", results, installingId: null }));
+    } catch {
+      setComponentUpdates((current) => ({ ...current, installingId: null, installErrorId: id }));
+    }
+  }
+
   function changeAutomaticUpdateChecks(enabled: boolean) {
     saveAutomaticUpdateChecksEnabled(enabled);
     setAutomaticUpdateChecksEnabled(enabled);
@@ -288,6 +351,11 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   useEffect(() => {
     notificationsEnabledRef.current = notificationsEnabled;
   }, [notificationsEnabled]);
+
+  useEffect(() => {
+    completionSoundEnabledRef.current = appSettings.completionSoundEnabled;
+    document.documentElement.dataset.accent = appSettings.accentColor;
+  }, [appSettings.completionSoundEnabled, appSettings.accentColor]);
 
   useEffect(() => {
     applyTheme(theme);
@@ -325,27 +393,48 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     root.style.setProperty("--tt-y", `${cy}px`);
     root.style.setProperty("--tt-r", `${radius}px`);
     root.style.setProperty("--tt-dur", themeTransitionDuration);
-
-    transitionDocument.startViewTransition(commitTheme);
+    root.classList.remove("theme-transition-interactive");
+    const transitionId = ++themeTransitionId.current;
+    const transition = transitionDocument.startViewTransition(commitTheme);
+    const unlockTimer = window.setTimeout(() => {
+      if (themeTransitionId.current === transitionId) {
+        root.classList.add("theme-transition-interactive");
+      }
+    }, 1000);
+    const finish = () => {
+      window.clearTimeout(unlockTimer);
+      if (themeTransitionId.current === transitionId) {
+        root.classList.remove("theme-transition-interactive");
+      }
+    };
+    void transition.finished.then(finish, finish);
   }
 
-  const toggleTheme = (event: MouseEvent<HTMLButtonElement>) => {
-    const nextTheme = nextThemePreference(theme);
-
+  const changeTheme = (nextTheme: ThemePreference, trigger: HTMLElement | null) => {
     const commitTheme = () => {
       applyTheme(nextTheme);
       saveTheme(nextTheme);
       flushSync(() => setTheme(nextTheme));
     };
+    startThemeTransition(commitTheme, trigger);
+  };
 
-    startThemeTransition(commitTheme, event.currentTarget);
+  const toggleTheme = (event: MouseEvent<HTMLButtonElement>) => {
+    changeTheme(nextThemePreference(theme), event.currentTarget);
   };
 
   const updateAppSettings = (patch: SettingsPatch) => {
-    void api
+    return api
       .updateSettings(patch)
-      .then(setAppSettings)
-      .catch(() => undefined);
+      .then((settings) => {
+        setAppSettings(settings);
+        completionSoundEnabledRef.current = settings.completionSoundEnabled;
+        if (patch.defaultDownloadDir !== undefined) {
+          setDefaultDestinationDir(settings.defaultDownloadDir ?? "Downloads");
+        }
+        return true;
+      })
+      .catch(() => false);
   };
 
   const updateBrowserAuthSettings = (nextSettings: BrowserAuthSettings) => {
@@ -671,7 +760,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             onSectionChange={setSection}
             onNotifications={() => void toggleNotifications()}
             onTheme={toggleTheme}
-            onSettings={() => setSettingsOpen(true)}
+            onSettings={() => setSection("settings")}
           />
           <div className="application-content">
             {updateCheck.status === "available" && updateCheck.result && automaticUpdateChecksEnabled && !updateNoticeDismissed ? (
@@ -687,6 +776,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             <div className="app-section-host" hidden={section !== "new"}>
               <Downloader
                 authSettings={authSettings}
+                defaultDestinationDir={defaultDestinationDir}
                 includeVideoTechnicalDetailsInFilename={appSettings.includeVideoTechnicalDetailsInFilename}
                 url={newDownloadUrl}
                 sourceIsVideo={sourceIsVideo}
@@ -700,11 +790,13 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             <div className="app-section-host" hidden={section !== "playlist"}>
               <Playlist
                 url={playlistUrl}
+                defaultDestinationDir={defaultDestinationDir}
                 sourceIsPlaylist={sourceIsPlaylist}
                 authSettings={authSettings}
                 authenticated={youtubeAuthStatus.authenticated}
                 includeVideoTechnicalDetailsInFilename={appSettings.includeVideoTechnicalDetailsInFilename}
                 formatSelectionMode={appSettings.playlistFormatSelectionMode}
+                showThumbnails={appSettings.showThumbnails}
                 jobs={jobs}
                 finishedMediaSignatures={finishedMediaSignatures}
                 onUrlChange={changePlaylistUrl}
@@ -715,6 +807,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             {section === "queue" ? (
               <Queue
                 jobs={jobs}
+                showThumbnails={appSettings.showThumbnails}
                 onCancel={(id) => { void api.cancelJob(id).then(refreshJobs); }}
                 onPause={(id) => { void api.pauseJob(id).then(refreshJobs); }}
                 onResume={(id) => { void api.resumeJob(id).then(refreshJobs); }}
@@ -730,43 +823,48 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             {section === "history" ? (
               <History
                 items={history}
+                showThumbnails={appSettings.showThumbnails}
                 onOpenFolder={(path) => { void api.openDownloadFolder(path); }}
                 onRepeat={repeatHistoryItem}
                 onRemove={async (id) => { await api.removeHistoryItem(id); setHistory((current) => current.filter((item) => item.id !== id)); }}
                 onClear={async () => { await api.clearHistory(); setHistory([]); }}
               />
             ) : null}
+            {section === "settings" ? (
+              <SettingsPanel
+                isOpen
+                settings={authSettings}
+                downloadSettings={appSettings}
+                platform={platform}
+                locale={locale}
+                theme={theme}
+                defaultDestinationDir={defaultDestinationDir}
+                onThemeChange={changeTheme}
+                youtubeAuthStatus={youtubeAuthStatus}
+                youtubeAuthPhase={youtubeAuthPhase}
+                youtubeAuthBrowser={youtubeAuthBrowser}
+                youtubeAuthError={youtubeAuthError}
+                updateCheck={updateCheck}
+                componentUpdates={componentUpdates}
+                automaticUpdateChecksEnabled={automaticUpdateChecksEnabled}
+                onChange={updateBrowserAuthSettings}
+                onYoutubeLogin={() => void startYoutubeLogin()}
+                onYoutubeWebviewLogin={() => void startYoutubeWebviewLogin()}
+                onYoutubeLogout={() => void signOutYoutube()}
+                onYoutubeClear={() => void clearYoutubeAuth()}
+                onCheckForUpdates={() => void checkForUpdates()}
+                onCheckComponentUpdates={() => void checkComponentUpdates()}
+                onInstallComponentUpdate={(id) => void installComponentUpdate(id)}
+                onAutomaticUpdateChecksChange={changeAutomaticUpdateChecks}
+                onDownloadSettingsChange={updateAppSettings}
+                onLocaleChange={onLocaleChange}
+                onOpenExternalUrl={(url) => { void api.openExternalUrl(url).catch(() => undefined); }}
+                onClose={() => setSection("new")}
+              />
+            ) : null}
           </div>
         </div>
       </section>
-      <SettingsPanel
-        isOpen={settingsOpen}
-        settings={authSettings}
-        downloadSettings={appSettings}
-        platform={platform}
-        locale={locale}
-        youtubeAuthStatus={youtubeAuthStatus}
-        youtubeAuthPhase={youtubeAuthPhase}
-        youtubeAuthBrowser={youtubeAuthBrowser}
-        youtubeAuthError={youtubeAuthError}
-        updateCheck={updateCheck}
-        automaticUpdateChecksEnabled={automaticUpdateChecksEnabled}
-        onChange={(nextSettings) =>
-          updateBrowserAuthSettings(nextSettings)
-        }
-        onYoutubeLogin={() => void startYoutubeLogin()}
-        onYoutubeWebviewLogin={() => void startYoutubeWebviewLogin()}
-        onYoutubeLogout={() => void signOutYoutube()}
-        onYoutubeClear={() => void clearYoutubeAuth()}
-        onCheckForUpdates={() => void checkForUpdates()}
-        onAutomaticUpdateChecksChange={changeAutomaticUpdateChecks}
-        onDownloadSettingsChange={updateAppSettings}
-        onLocaleChange={onLocaleChange}
-        onOpenExternalUrl={(url) => {
-          void api.openExternalUrl(url).catch(() => undefined);
-        }}
-        onClose={() => setSettingsOpen(false)}
-      />
       {mixedSourcePrompt ? (
         <div className="dialog-backdrop" role="presentation">
           <section className="compact-dialog" role="dialog" aria-modal="true" aria-labelledby="mixed-source-title">

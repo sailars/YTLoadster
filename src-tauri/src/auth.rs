@@ -919,7 +919,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn protect_session(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn protect_session(data: &[u8]) -> Result<Vec<u8>, String> {
     use windows::core::w;
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{
@@ -952,7 +952,7 @@ fn protect_session(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn unprotect_session(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn unprotect_session(data: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{
         CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,

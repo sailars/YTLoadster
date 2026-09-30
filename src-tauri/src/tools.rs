@@ -95,6 +95,7 @@ pub struct ToolEnvironment {
     pub platform: ToolPlatform,
     pub app_dir: PathBuf,
     pub app_tools_dir: PathBuf,
+    pub managed_tools_dir: Option<PathBuf>,
     pub project_dir: PathBuf,
     pub path_dirs: Vec<PathBuf>,
 }
@@ -117,6 +118,7 @@ impl ToolEnvironment {
             platform,
             app_dir,
             app_tools_dir,
+            managed_tools_dir: None,
             project_dir,
             path_dirs,
         }
@@ -124,6 +126,16 @@ impl ToolEnvironment {
 
     pub fn current_for_app(app: &AppHandle) -> Self {
         let mut environment = Self::current();
+        // Windows portable updates replace the bundled executables directly.
+        // Older per-user copies must not take precedence over those files.
+        environment.managed_tools_dir = if environment.platform == ToolPlatform::Windows {
+            None
+        } else {
+            app.path()
+                .app_data_dir()
+                .ok()
+                .map(|dir| dir.join("components"))
+        };
         if environment.platform == ToolPlatform::MacOS {
             if let Ok(resources_dir) = app.path().resource_dir() {
                 environment.app_tools_dir = macos_resource_tools_dir(&resources_dir);
@@ -141,6 +153,7 @@ impl ToolEnvironment {
             platform,
             app_dir: project_dir.clone(),
             app_tools_dir: platform_tools_dir(&project_dir, platform),
+            managed_tools_dir: None,
             project_dir,
             path_dirs: Vec::new(),
         }
@@ -222,6 +235,10 @@ fn tool_candidates(
         candidates.push(path);
     }
 
+    if let Some(root) = &env.managed_tools_dir {
+        candidates.extend(managed_tool_candidates(root, tool, env.platform));
+    }
+
     for executable in tool.executable_names(env.platform) {
         candidates.push(env.app_dir.join(executable));
         // Keep this physical bundle path ahead of Tauri's resource resolver.
@@ -293,6 +310,63 @@ fn tool_candidates(
     candidates
 }
 
+fn managed_tool_candidates(root: &Path, tool: ToolName, platform: ToolPlatform) -> Vec<PathBuf> {
+    let component = match tool {
+        ToolName::YtDlp => "ytdlp",
+        ToolName::Deno => "deno",
+        ToolName::Ffmpeg | ToolName::Ffprobe => "ffmpeg",
+        ToolName::Node => return Vec::new(),
+    };
+    let Ok(entries) = std::fs::read_dir(root.join(component)) else {
+        return Vec::new();
+    };
+    let mut versions = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let version = entry.file_name().to_string_lossy().to_string();
+            version_numbers(&version).map(|parts| (parts, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    versions.sort_by(|left, right| right.0.cmp(&left.0));
+
+    versions
+        .into_iter()
+        .filter(|(_, dir)| {
+            if component != "ffmpeg" {
+                return true;
+            }
+            ToolName::Ffmpeg
+                .executable_names(platform)
+                .iter()
+                .any(|name| dir.join(name).is_file())
+                && ToolName::Ffprobe
+                    .executable_names(platform)
+                    .iter()
+                    .any(|name| dir.join(name).is_file())
+        })
+        .flat_map(|(_, dir)| {
+            tool.executable_names(platform)
+                .iter()
+                .map(move |name| dir.join(name))
+        })
+        .collect()
+}
+
+pub(crate) fn version_numbers(value: &str) -> Option<Vec<u32>> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return None;
+    }
+    value
+        .split('.')
+        .map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
 fn platform_tools_dir(base: &Path, platform: ToolPlatform) -> PathBuf {
     match platform {
         ToolPlatform::Windows => base.join("tools").join("windows").join("x64"),
@@ -343,6 +417,7 @@ mod tests {
             platform: ToolPlatform::Windows,
             app_dir: app_dir.clone(),
             app_tools_dir: app_dir.join("tools").join("windows").join("x64"),
+            managed_tools_dir: None,
             project_dir: app_dir.clone(),
             path_dirs: vec![path_dir],
         };
@@ -363,6 +438,44 @@ mod tests {
             inventory.ffmpeg.path,
             Some(root.join("tools/windows/x64/ffmpeg/ffmpeg.exe"))
         );
+    }
+
+    #[test]
+    fn chooses_portable_windows_components_without_using_legacy_user_copies() {
+        let root = unique_temp_dir();
+        for relative in [
+            "tools/windows/x64/deno.exe",
+            "tools/windows/x64/yt-dlp.exe",
+            "tools/windows/x64/ffmpeg/ffmpeg.exe",
+            "tools/windows/x64/ffmpeg/ffprobe.exe",
+            "components/deno/2.9.7/deno.exe",
+            "components/ytdlp/2026.09.01/yt-dlp.exe",
+            "components/ffmpeg/9.0.1/ffmpeg.exe",
+            "components/ffmpeg/9.0.1/ffprobe.exe",
+        ] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"test").unwrap();
+        }
+        let env = ToolEnvironment::for_project_with_platform(root.clone(), ToolPlatform::Windows);
+        let inventory = discover_tools(ToolConfig::default(), env);
+        assert_eq!(
+            inventory.ytdlp.path,
+            Some(root.join("tools/windows/x64/yt-dlp.exe"))
+        );
+        assert_eq!(
+            inventory.js_runtime.path,
+            Some(root.join("tools/windows/x64/deno.exe"))
+        );
+        assert_eq!(
+            inventory.ffmpeg.path,
+            Some(root.join("tools/windows/x64/ffmpeg/ffmpeg.exe"))
+        );
+        assert_eq!(
+            inventory.ffprobe.path,
+            Some(root.join("tools/windows/x64/ffmpeg/ffprobe.exe"))
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -410,6 +523,7 @@ mod tests {
             // root. Discovery must still use the path derived from the
             // packaged executable.
             app_tools_dir: root.join("resolver-without-tools"),
+            managed_tools_dir: None,
             project_dir: root,
             path_dirs: Vec::new(),
         };

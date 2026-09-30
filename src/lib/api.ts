@@ -12,6 +12,8 @@ import type {
   SettingsPatch,
   ToolInventory,
   UpdateCheckResult,
+  ComponentId,
+  ComponentUpdateStatus,
   YoutubeAuthStart,
   YoutubeAuthStatus,
   YoutubeAuthWindowState,
@@ -37,6 +39,12 @@ export const api = {
   checkForUpdates() {
     return invoke<UpdateCheckResult>("check_for_updates");
   },
+  checkComponentUpdates() {
+    return invoke<ComponentUpdateStatus[]>("check_component_updates");
+  },
+  installComponentUpdate(id: ComponentId) {
+    return invoke<string>("install_component_update", { id });
+  },
   getDefaultDownloadDir() {
     return invoke<string>("get_default_download_dir");
   },
@@ -60,17 +68,28 @@ export const api = {
     });
     return typeof selected === "string" ? selected : null;
   },
-  probeUrl(url: string, cookieSource?: CookieSource | null) {
-    return invoke<MediaInfo>("probe_url", { url, cookieSource: cookieSource ?? null });
+  probeUrl(url: string, cookieSource: CookieSource | null | undefined, analysisId: string) {
+    return invoke<MediaInfo>("probe_url", { url, cookieSource: cookieSource ?? null, analysisId });
   },
-  probePlaylist(url: string, cookieSource?: CookieSource | null) {
-    return invoke<PlaylistInfo>("probe_playlist", { url, cookieSource: cookieSource ?? null });
+  cancelUrlAnalysis(analysisId: string) {
+    return invoke<void>("cancel_url_analysis", { analysisId });
   },
-  probePlaylistItem(entryId: string, url: string, cookieSource?: CookieSource | null) {
+  probePlaylist(url: string, cookieSource: CookieSource | null | undefined, analysisId: string) {
+    return invoke<PlaylistInfo>("probe_playlist", { url, cookieSource: cookieSource ?? null, analysisId });
+  },
+  beginPlaylistAnalysis(analysisId: string) {
+    return invoke<void>("begin_playlist_analysis", { analysisId });
+  },
+  cancelPlaylistAnalysis(analysisId: string) {
+    return invoke<void>("cancel_playlist_analysis", { analysisId });
+  },
+  probePlaylistItem(entryId: string, url: string, cookieSource: CookieSource | null | undefined, analysisId: string, requestId: string) {
     return invoke<PlaylistItemAnalysis>("probe_playlist_item", {
       entryId,
       url,
       cookieSource: cookieSource ?? null,
+      analysisId,
+      requestId,
     });
   },
   enqueueDownload(request: DownloadRequest) {
@@ -126,6 +145,9 @@ export const api = {
   },
   showSystemNotification(title: string, body: string) {
     return invoke<void>("show_system_notification", { title, body });
+  },
+  playCompletionSound() {
+    return invoke<void>("play_completion_sound");
   },
   getYoutubeAuthStatus() {
     return invoke<YoutubeAuthStatus>("get_youtube_auth_status");

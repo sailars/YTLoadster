@@ -1,8 +1,10 @@
 pub mod auth;
+pub mod component_updates;
 pub mod downloads;
 pub mod filesystem;
 pub mod notifications;
 pub mod power;
+pub mod proxy;
 pub mod storage;
 pub mod tools;
 pub mod tray;
@@ -139,12 +141,19 @@ pub fn run() {
                         tray::TrayController::unavailable(app.handle(), lifecycle.clone())
                     });
             app.manage(download_manager);
+            app.manage(component_updates::ComponentUpdateLock::default());
             app.manage(sleep_inhibitor);
             app.manage(lifecycle);
             app.manage(tray);
+            let proxy_url = storage.effective_proxy_url().unwrap_or_else(|error| {
+                eprintln!("could not load proxy settings: {error}");
+                None
+            });
             app.manage(ytdlp::YtdlpRuntimeSettings::new(
                 settings.effective_custom_user_agent(),
+                proxy_url,
             ));
+            app.manage(ytdlp::AnalysisProcessManager::default());
             app.manage(storage);
             app.manage(auth::YoutubeAuthManager::default());
             Ok(())
@@ -165,6 +174,7 @@ pub fn run() {
             auth::start_youtube_auth,
             auth::start_youtube_webview_auth,
             notifications::show_system_notification,
+            notifications::play_completion_sound,
             downloads::cancel_all_jobs,
             downloads::cancel_job,
             downloads::clear_jobs,
@@ -187,10 +197,15 @@ pub fn run() {
             storage::update_settings,
             tray::set_tray_locale,
             tools::get_tool_status,
+            component_updates::check_component_updates,
+            component_updates::install_component_update,
             updates::check_for_updates,
             ytdlp::probe_playlist,
             ytdlp::probe_playlist_item,
-            ytdlp::probe_url
+            ytdlp::probe_url,
+            ytdlp::begin_playlist_analysis,
+            ytdlp::cancel_playlist_analysis,
+            ytdlp::cancel_url_analysis
         ])
         .build(tauri::generate_context!())
         .expect("failed to build YTLoadster");

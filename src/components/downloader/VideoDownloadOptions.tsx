@@ -48,7 +48,7 @@ export function VideoDownloadOptions({ formats, audioFormats, profile, onProfile
   const available = (key: keyof VideoSelection, value: string) => value === "all" || isFilterValueAvailable(formats, filters, key, value);
   return <div className="options-stack">
     <section className="video-profile-select" aria-label={t("video.profile")}>
-      <label><span>{t("video.profile")}</span><ParameterSelect label={t("video.profile")} value={profile} options={profileOptions} selectedOption={profile === "custom" ? { value: "custom", label: t("video.custom"), description: t("video.customDescription") } : undefined} onChange={chooseProfile} /></label>
+      <label><ParameterSelect label={t("video.profile")} value={profile} options={profileOptions} selectedOption={profile === "custom" ? { value: "custom", label: t("video.custom"), description: t("video.customDescription") } : undefined} onChange={chooseProfile} /></label>
       {profile !== "custom" && formats.length > 0 && !profileResults.get(profile)?.available ? <p className="profile-unavailable">{t("video.profileUnavailable")}</p> : null}
     </section>
     <section className="advanced-settings video-advanced-settings" aria-label={t("video.advancedLabel")}>

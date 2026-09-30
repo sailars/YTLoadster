@@ -980,7 +980,8 @@ button:disabled {
   z-index: 40;
   top: calc(100% + 8px);
   left: 0;
-  width: min(280px, 100%);
+  width: 280px;
+  max-width: calc(100vw - 48px);
   box-sizing: border-box;
   visibility: hidden;
   border-radius: 5px;
@@ -998,6 +999,8 @@ button:disabled {
 }
 
 .settings-retry-field:nth-child(3) .settings-retry-tooltip {
+  top: auto;
+  bottom: calc(100% + 8px);
   right: 0;
   left: auto;
 }
@@ -2641,7 +2644,7 @@ select option:checked {
 
 .about-details dt {
   color: #6c716d;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .about-details dd {
@@ -2762,6 +2765,60 @@ select option:checked {
 
 .about-update-status[data-state="error"] {
   color: #a74444;
+}
+
+.component-update-list {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.component-update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 48px;
+  padding: 8px 0;
+  border-bottom: 1px solid #e8ece9;
+}
+
+.component-update-row:last-child {
+  border-bottom: 0;
+}
+
+.component-update-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: #656c67;
+  font-size: 12.5px;
+}
+
+.component-update-copy strong {
+  color: #2b302c;
+  font-weight: 650;
+}
+
+.component-update-error {
+  color: #a74444;
+}
+
+.component-update-source {
+  width: fit-content;
+  color: #2d587c;
+  font-weight: 600;
+  text-underline-offset: 3px;
+}
+
+button.secondary.component-update-install {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 6px 11px;
+  font-size: 12px;
 }
 
 button.secondary.about-update-check,
@@ -3778,6 +3835,10 @@ button.risk-slider-value.selected:hover {
   color-scheme: light;
 }
 
+:root.theme-transition-interactive::view-transition {
+  pointer-events: none;
+}
+
 ::view-transition-new(root) {
   z-index: 1;
   mix-blend-mode: normal;
@@ -4737,6 +4798,26 @@ button.secondary.theme-button:active {
   color: #e59696;
 }
 
+:root[data-theme="dark"] .component-update-row {
+  border-color: #2a3942;
+}
+
+:root[data-theme="dark"] .component-update-copy {
+  color: #8fa1ae;
+}
+
+:root[data-theme="dark"] .component-update-copy strong {
+  color: #dbe5eb;
+}
+
+:root[data-theme="dark"] .component-update-error {
+  color: #e59696;
+}
+
+:root[data-theme="dark"] .component-update-source {
+  color: #8db8d5;
+}
+
 :root[data-theme="dark"] .about-update-toggle {
   color: #aebfc9;
 }
@@ -5036,7 +5117,15 @@ button.secondary.theme-button:active {
 .mode-tab[aria-selected="true"] { z-index: 2; border-color: #2563eb; color: #2563eb; background: #f8fbff; }
 .mode-tab[aria-selected="true"]::after { display: none; }
 .mode-tab[aria-selected="true"] .mode-tab-icon { color: #2563eb; background: transparent; }
-.audio-title ~ .toggle-list .switch-row { justify-content: flex-start; width: fit-content; gap: 8px; }
+.download-parameters-heading {
+  margin: 4px 0 0;
+  color: #263747;
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+}
+:root[data-theme="dark"] .download-parameters-heading { color: #dce6ed; }
 .video-profile-select > label { display: grid; gap: 6px; color: #334155; font-size: 13px; font-weight: 650; }
 .profile-unavailable { margin: 7px 0 0; color: #b45309; font-size: 12px; line-height: 1.35; }
 .video-advanced-settings { border: 1px solid #dbe3ea; border-radius: 8px; padding: 12px; }
@@ -8198,3 +8287,551 @@ button.primary:hover:not(:disabled),
 .settings-toggle-with-help .auth-help-icon:focus-visible::after {
   transform: translateY(0);
 }
+
+/* Settings workspace */
+.application-content > .settings-page {
+  width: min(100%, 920px);
+  margin: 0 auto;
+}
+
+.settings-page-shell {
+  min-height: min(640px, calc(100vh - 105px));
+  overflow: hidden;
+  border: 1px solid #dde3ea;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.settings-page-heading {
+  display: flex;
+  min-height: 62px;
+  align-items: center;
+  border-bottom: 1px solid #dde3ea;
+  padding: 12px 20px;
+}
+
+.settings-page-heading h2 {
+  margin: 0;
+  color: #263747;
+  font-family: "Montserrat", "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  font-size: 19px;
+  font-weight: 600;
+}
+
+.settings-page-layout {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  min-height: 560px;
+}
+
+.settings-category-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-right: 1px solid #dde3ea;
+  padding: 12px;
+}
+
+.settings-category-button {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 40px;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-radius: 7px;
+  padding: 0 12px;
+  color: #64748b;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.settings-category-button svg { width: 17px; height: 17px; flex: 0 0 17px; }
+.settings-page .settings-category-button { font-family: "Onest", "Segoe UI Variable Text", "Segoe UI", sans-serif; font-weight: 500; }
+.settings-category-button:hover { background: #f3f6f9; color: #263747; }
+.settings-category-button[data-active="true"] { color: var(--azure-accent); background: var(--azure-accent-soft); }
+.settings-category-button[data-active="true"]::before {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 0;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--azure-accent);
+  content: "";
+}
+
+.settings-page-content { min-width: 0; padding: 0 6px; }
+.settings-page { font-family: "Onest", "Segoe UI Variable Text", "Segoe UI", sans-serif; font-weight: 400; }
+.settings-page .settings-panel { max-width: 610px; gap: 20px; padding: 22px 28px 32px; }
+.settings-page .settings-section { display: grid; max-width: 510px; gap: 0; }
+.settings-page #settings-downloads-panel .settings-section { max-width: 450px; }
+.settings-page #settings-downloads-panel { --settings-divider-gap: 16px; gap: var(--settings-divider-gap); }
+.settings-page #settings-downloads-panel .settings-default-folder { margin-bottom: 0; }
+.settings-page :is(#settings-main-panel, #settings-appearance-panel) .settings-section { max-width: 390px; }
+.settings-page .settings-section + .settings-section { border-color: #e2e8ef; padding-top: 18px; }
+.settings-page .settings-section:not(:last-child) > :is(.settings-switch-row, .settings-select-row, .checkbox-label):last-child {
+  border-bottom: 0;
+}
+.settings-page .browser-cookie-auth-block + .youtube-auth-block { position: relative; margin-top: 34px; }
+.settings-page .browser-cookie-auth-block + .youtube-auth-block::before {
+  position: absolute;
+  top: -19px;
+  right: 0;
+  left: 0;
+  border-top: 1px solid #e2e8ef;
+  content: "";
+}
+.settings-page .settings-section h3 {
+  margin: 0 0 6px;
+  color: #7b8796;
+  font-family: "Onest", "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.settings-page .settings-field,
+.settings-page .settings-field > span:first-child,
+.settings-page .checkbox-label,
+.settings-page .youtube-auth-heading {
+  font-family: "Onest", "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  font-weight: 400;
+}
+.settings-page .settings-hint { font-weight: 400; }
+
+.settings-page .settings-language-field,
+.settings-page .settings-select-row,
+.settings-page .settings-switch-row,
+.settings-page .settings-toggle-with-help,
+.settings-page .settings-accent-row {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #e7ebef;
+  color: #263747;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.settings-page :is(.settings-language-field, .settings-select-row, .settings-switch-row, .settings-toggle-with-help, .settings-accent-row, .settings-theme-field, .browser-cookie-auth-heading) {
+  width: min(100%, 390px);
+  max-width: none;
+}
+.settings-page .settings-language-field,
+.settings-page .settings-select-row { display: grid; grid-template-columns: minmax(0, 1fr) 180px; }
+.settings-page .settings-language-field { width: min(100%, 388px); min-height: 60px; padding-bottom: 8px; grid-template-columns: minmax(0, 1fr) 200px; }
+.settings-page :is(.settings-language-field, .settings-select-row) > .parameter-select,
+.settings-page .settings-section:first-of-type :is(.settings-language-field, .settings-select-row) > .parameter-select {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+.settings-page .parameter-select-trigger { min-height: 36px; border-radius: 7px; }
+.settings-page .settings-switch-row { cursor: pointer; }
+.settings-page .settings-toggle-copy { display: inline-flex; min-width: 0; align-items: center; gap: 8px; }
+.settings-page .settings-toggle-with-help { justify-content: space-between; }
+.settings-page .browser-cookie-auth-heading { display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e7ebef; color: #263747; font-size: 13px; }
+.settings-page .auth-help-icon::after {
+  right: auto;
+  left: 50%;
+  width: min(300px, calc(100vw - 80px));
+  transform: translate(-50%, -3px);
+}
+.settings-page .auth-help-icon:hover::after,
+.settings-page .auth-help-icon:focus-visible::after { transform: translate(-50%, 0); }
+.settings-page .checkbox-label { justify-content: space-between; gap: 18px; cursor: pointer; }
+.settings-page .checkbox-label > span:not(.settings-switch-control) { order: 1; min-width: 0; }
+.settings-page .checkbox-label > .settings-switch-control { order: 2; margin-left: auto; }
+.settings-page .settings-switch-control {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 23px;
+  flex: 0 0 40px;
+  vertical-align: middle;
+}
+.settings-page .settings-switch-control input[type="checkbox"] {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.settings-page .settings-switch-control input[type="checkbox"]:disabled { cursor: default; }
+.settings-page .settings-switch-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: #c9ced6;
+  transition: background 160ms ease, box-shadow 160ms ease;
+}
+.settings-page .settings-switch-track::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
+  transition: transform 160ms ease;
+  content: "";
+}
+.settings-page .settings-switch-control input[type="checkbox"]:checked + .settings-switch-track { background: var(--azure-accent); }
+.settings-page .settings-switch-control input[type="checkbox"]:checked + .settings-switch-track::after { transform: translateX(17px); }
+.settings-page .settings-switch-control input[type="checkbox"]:focus-visible + .settings-switch-track { box-shadow: 0 0 0 3px var(--azure-focus-ring); }
+.settings-page .settings-switch-control input[type="checkbox"]:disabled + .settings-switch-track { opacity: .55; }
+
+.settings-page .settings-section:first-of-type .settings-default-folder { max-width: none; }
+.settings-page .settings-default-folder { gap: 8px; padding: 8px 0 0; margin-bottom: -4px; font-weight: 400; }
+.settings-path-row { display: flex; gap: 8px; }
+.settings-path-row input { min-width: 0; flex: 1; }
+.settings-path-row button { flex: 0 0 auto; }
+.settings-page .settings-downloads-section .settings-field-grid { grid-template-columns: 1fr; gap: 0; margin-top: 0; }
+.settings-page .settings-downloads-section .settings-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #e7ebef;
+  padding: 10px 0;
+}
+.settings-page .settings-downloads-section .settings-field > span { white-space: normal; color: #263747; font-weight: 400; }
+.settings-page .settings-downloads-section .risk-slider { width: min(100%, 240px); min-height: 62px; }
+.settings-page .settings-downloads-section .connection-risk { grid-column: 1; }
+.settings-page .settings-file-names-section > .checkbox-label { display: flex; min-height: 52px; align-items: center; flex-direction: row; justify-content: space-between; border-bottom: 1px solid #e7ebef; }
+.settings-page .settings-file-names-section > :is(.settings-select-row, .checkbox-label) {
+  width: min(100%, 430px);
+  min-height: 64px;
+}
+.settings-page .settings-user-agent-section > .checkbox-label { width: min(100%, 390px); }
+.settings-page .settings-playlist-format-mode { padding: 8px 0; }
+.settings-page #settings-downloads-panel .settings-downloads-section .settings-field { padding-bottom: var(--settings-divider-gap); }
+.settings-page #settings-downloads-panel .settings-downloads-section + .settings-section {
+  margin-top: calc(-1 * var(--settings-divider-gap));
+  border-top: 0;
+}
+.settings-page #settings-downloads-panel .settings-file-names-section > :is(.settings-select-row, .checkbox-label) {
+  width: 100%;
+  min-height: 0;
+  padding: 12px 0 var(--settings-divider-gap);
+}
+.settings-page #settings-downloads-panel .settings-file-names-section > .checkbox-label:last-child,
+.settings-page #settings-downloads-panel .settings-playlist-format-mode { padding-bottom: 0; }
+.settings-page #settings-downloads-panel .settings-file-names-section > .settings-select-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.settings-page #settings-downloads-panel .settings-file-names-section > .settings-select-row > .parameter-select { width: min(100%, 170px); }
+.settings-page #settings-downloads-panel .settings-playlist-format-mode > .parameter-select { width: min(100%, 400px); }
+.settings-page .settings-retry-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.settings-page .settings-retry-grid .settings-retry-field { grid-template-rows: minmax(36px, auto) 40px; align-content: end; }
+.settings-page .settings-user-agent-section { gap: 10px; }
+.settings-page .settings-user-agent-section > .checkbox-label {
+  display: flex;
+  min-height: 42px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.settings-page .settings-user-agent-section > .settings-hint { margin: 0; }
+.settings-page .settings-theme-field { padding: 10px 0 17px; border-bottom: 1px solid #e7ebef; color: #263747; font-size: 13px; }
+.settings-theme-choices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; border: 1px solid #e2e8ef; border-radius: 9px; padding: 4px; background: #f3f6f9; }
+.settings-theme-choices button { display: flex; min-height: 64px; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border: 0; border-radius: 7px; color: #64748b; background: #fff; font-size: 12px; }
+.settings-theme-choices button:hover { color: var(--azure-accent); }
+.settings-theme-choices button[aria-pressed="true"], .settings-theme-choices button[aria-pressed="true"]:hover { color: #fff; background: var(--azure-accent); }
+.settings-theme-choices svg { width: 18px; height: 18px; }
+.settings-page .settings-section:first-of-type .settings-proxy-mode { width: min(100%, 188px); max-width: none; padding: 8px 0 0; margin-bottom: -7px; }
+.settings-page .settings-proxy-mode > .parameter-select { width: 100%; max-width: none; }
+.settings-page .settings-proxy-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 12px 0; }
+.settings-page .settings-proxy-fields .settings-field:first-of-type { grid-column: span 3; }
+.settings-page .settings-proxy-fields .settings-field:nth-of-type(n + 3) { grid-column: span 2; }
+.settings-page .settings-proxy-clear { grid-column: 1 / -1; justify-self: start; }
+.settings-page .settings-proxy-actions { display: flex; min-height: 52px; align-items: center; gap: 12px; }
+.settings-page .settings-proxy-status { color: #64748b; font-size: 12px; }
+.settings-page .settings-proxy-error { margin: 10px 0 0; color: #a43b3b; font-size: 12px; }
+.settings-page :is(.settings-reset-button, .settings-proxy-actions .primary, .settings-user-agent-save, .settings-path-row button) {
+  min-height: 40px;
+  border-radius: 7px;
+  padding: 0 16px;
+  font-family: "Onest", "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+}
+.settings-page .settings-section-heading { align-items: center; }
+.settings-page #settings-downloads-panel .settings-reset-button { display: inline-flex; width: 28px; min-width: 28px; min-height: 28px; align-items: center; justify-content: center; padding: 0; }
+.settings-page #settings-downloads-panel .settings-reset-button svg { width: 14px; height: 14px; flex: 0 0 14px; }
+.settings-page .settings-proxy-actions .primary,
+.settings-page .settings-user-agent-save { min-width: 108px; }
+.settings-page .settings-proxy-actions .primary:disabled { border-color: #d7e0e8; color: #788996; background: #eef2f5; opacity: 1; }
+.settings-page :is(.settings-path-row input, .settings-proxy-fields input, .settings-user-agent-row input) { min-height: 40px; font-size: 13px; font-weight: 400; }
+.settings-page .settings-accent-options { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.settings-page .settings-accent-swatch { display: block; width: 30px; min-width: 30px; height: 30px; flex: 0 0 30px; border: 2px solid #fff; border-radius: 50%; padding: 0; background: var(--swatch); box-shadow: 0 0 0 1px #cbd5e1; }
+.settings-page .settings-accent-swatch:hover { background: var(--swatch); box-shadow: 0 0 0 2px #a6b6c4; }
+.settings-accent-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--azure-accent); }
+.settings-page .settings-accent-swatch[aria-pressed="true"]:hover { box-shadow: 0 0 0 2px var(--azure-accent); }
+.settings-accent-swatch[data-color="blue"] { --swatch: #0a84ff; }
+.settings-accent-swatch[data-color="purple"] { --swatch: #5e5ce6; }
+.settings-accent-swatch[data-color="cyan"] { --swatch: #30b0c7; }
+.settings-accent-swatch[data-color="green"] { --swatch: #34c759; }
+.settings-accent-swatch[data-color="orange"] { --swatch: #ff9f0a; }
+.settings-accent-swatch[data-color="pink"] { --swatch: #ff375f; }
+.settings-page .about-panel { max-width: 610px; }
+
+:root[data-theme="dark"] .settings-page-shell { border-color: #2a3944; background: #141d25; }
+:root[data-theme="dark"] .settings-page-heading,
+:root[data-theme="dark"] .settings-category-nav,
+:root[data-theme="dark"] .settings-page .settings-section + .settings-section { border-color: #2a3944; }
+:root[data-theme="dark"] .settings-category-button { color: #9caebb; }
+:root[data-theme="dark"] .settings-category-button:hover { color: #e2ebf1; background: #1d2a34; }
+:root[data-theme="dark"] .settings-category-button[data-active="true"] { color: var(--azure-accent); background: var(--azure-accent-soft); }
+:root[data-theme="dark"] .settings-page :is(.settings-language-field, .settings-select-row, .settings-switch-row, .settings-toggle-with-help, .settings-accent-row),
+:root[data-theme="dark"] .settings-page .settings-downloads-section .settings-field,
+:root[data-theme="dark"] .settings-page .settings-file-names-section > .checkbox-label { border-color: #2a3944; color: #dce6ed; }
+:root[data-theme="dark"] .settings-page .settings-downloads-section .settings-field > span { color: #dce6ed; }
+:root[data-theme="dark"] .settings-page .settings-theme-field { border-color: #2a3944; color: #dce6ed; }
+:root[data-theme="dark"] .settings-theme-choices { border-color: #2a3944; background: #101920; }
+:root[data-theme="dark"] .settings-theme-choices button { color: #9caebb; background: #1d2a34; }
+:root[data-theme="dark"] .settings-theme-choices button[aria-pressed="true"] { color: #fff; background: var(--azure-accent); }
+:root[data-theme="dark"] .settings-page .settings-switch-track { background: #394753; }
+:root[data-theme="dark"] .settings-page .settings-switch-control input[type="checkbox"]:checked + .settings-switch-track { background: var(--azure-accent); }
+:root[data-theme="dark"] .settings-page .browser-cookie-auth-heading { border-color: #2a3944; color: #dce6ed; }
+:root[data-theme="dark"] .settings-page .browser-cookie-auth-block + .youtube-auth-block::before { border-color: #2a3944; }
+:root[data-theme="dark"] .settings-page .settings-proxy-actions .primary:disabled { border-color: #344653; color: #95a5b0; background: #22313c; }
+:root[data-theme="dark"] .settings-page .settings-proxy-error { color: #e39a9a; }
+
+@media (max-width: 1000px) {
+  .settings-page-layout { grid-template-columns: 1fr; }
+  .settings-category-nav { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid #dde3ea; }
+  .settings-category-button { width: auto; flex: 0 0 auto; }
+  .settings-page .settings-panel { padding: 18px; }
+}
+
+:root[data-accent="purple"] { --azure-accent: #5e5ce6; }
+:root[data-accent="cyan"] { --azure-accent: #168fa6; }
+:root[data-accent="green"] { --azure-accent: #219e43; }
+:root[data-accent="orange"] { --azure-accent: #d77900; }
+:root[data-accent="pink"] { --azure-accent: #e92d59; }
+:root[data-accent]:not([data-accent="blue"]) {
+  --azure-accent-hover: color-mix(in srgb, var(--azure-accent), black 12%);
+  --azure-accent-active: color-mix(in srgb, var(--azure-accent), black 22%);
+  --azure-accent-soft: color-mix(in srgb, var(--azure-accent), white 91%);
+  --azure-accent-border: color-mix(in srgb, var(--azure-accent), white 48%);
+  --azure-focus-ring: color-mix(in srgb, var(--azure-accent), transparent 80%);
+}
+:root[data-theme="dark"][data-accent]:not([data-accent="blue"]) {
+  --azure-accent-soft: color-mix(in srgb, var(--azure-accent), #141d25 82%);
+  --azure-accent-border: color-mix(in srgb, var(--azure-accent), #141d25 35%);
+}
+
+:root[data-accent]:not([data-accent="blue"]) :is(button.primary, .primary) {
+  border-color: var(--azure-accent);
+  background: var(--azure-accent);
+}
+:root[data-accent]:not([data-accent="blue"]) :is(button.primary, .primary):hover:not(:disabled) {
+  border-color: var(--azure-accent-hover);
+  background: var(--azure-accent-hover);
+}
+:root[data-accent]:not([data-accent="blue"]) .sidebar-item[data-active="true"],
+:root[data-accent]:not([data-accent="blue"]) .sidebar-utility[data-active="true"] {
+  color: var(--azure-accent);
+  background: var(--azure-accent-soft);
+}
+:root[data-accent]:not([data-accent="blue"]) .sidebar-navigation .sidebar-item[data-active="true"]::before,
+:root[data-accent]:not([data-accent="blue"]) .sidebar-badge,
+:root[data-accent]:not([data-accent="blue"]) .progress-fill:not(.post-processing),
+:root[data-accent]:not([data-accent="blue"]) .playlist-checkbox[data-checked="true"],
+:root[data-accent]:not([data-accent="blue"]) .playlist-check input[type="checkbox"]:checked {
+  border-color: var(--azure-accent);
+  background: var(--azure-accent);
+}
+
+.application-content .queue-panel .job-row[data-no-thumbnail="true"],
+.history-row[data-no-thumbnail="true"] { grid-template-columns: minmax(0, 1fr) auto; }
+
+@media (max-width: 760px) {
+  .history-row[data-no-thumbnail="true"] { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Use the same centered square control in audio and playlist options. */
+:is(.checkbox-label, .switch-row, .playlist-check) > input[type="checkbox"] {
+  appearance: none;
+  display: grid;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px;
+  flex: 0 0 18px;
+  align-self: center;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  line-height: 0;
+}
+
+.audio-title ~ .toggle-list .switch-row {
+  display: grid;
+  width: max-content;
+  max-width: 100%;
+  grid-template-columns: minmax(0, max-content) 18px;
+  gap: 10px;
+  align-items: center;
+}
+
+:is(.checkbox-label, .switch-row) > input[type="checkbox"]::before,
+.playlist-check > input[type="checkbox"]::after,
+.playlist-checkbox::after {
+  width: 9px;
+  height: 5px;
+  border-bottom: 2px solid #fff;
+  border-left: 2px solid #fff;
+  opacity: 0;
+  transform: translateY(-1px) rotate(-45deg) scale(0.55);
+  transform-origin: center;
+  content: "";
+}
+
+:is(.checkbox-label, .switch-row) > input[type="checkbox"]:checked::before,
+.playlist-check > input[type="checkbox"]:checked::after,
+.playlist-checkbox[data-checked="true"]::after {
+  opacity: 1;
+  transform: translateY(-1px) rotate(-45deg) scale(1);
+}
+
+.playlist-checkbox {
+  flex: 0 0 18px;
+  line-height: 0;
+}
+
+.playlist-checkbox[data-disabled="true"]::after { border-color: #a4aeb7; }
+
+.settings-page .settings-switch-control { align-self: center; }
+
+/* The selected accent also colors download actions and parameter controls. */
+:root[data-accent] {
+  --accent-control-ink: color-mix(in srgb, var(--azure-accent), #172633 18%);
+  --accent-action-shadow: color-mix(in srgb, var(--azure-accent), transparent 72%);
+}
+
+:root[data-theme="dark"][data-accent] {
+  --accent-control-ink: color-mix(in srgb, var(--azure-accent), white 27%);
+}
+
+:root[data-accent] :is(.download-summary-card, .playlist-summary-card) {
+  border-color: var(--azure-accent-border);
+  box-shadow: 0 4px 18px var(--accent-action-shadow);
+}
+
+:root[data-theme="dark"][data-accent] :is(.download-summary-card, .playlist-summary-card) {
+  box-shadow: inset 0 0 24px var(--accent-action-shadow), 0 4px 18px rgba(0, 0, 0, .24);
+}
+
+:root[data-accent] .summary-tag {
+  border-color: var(--azure-accent-border);
+  color: var(--accent-control-ink);
+  background: var(--azure-accent-soft);
+}
+
+:root[data-accent] :is(.download-summary-card, .playlist-summary-card) .download-action:not(:disabled),
+:root[data-accent] :is(.download-summary-card, .playlist-summary-card) .download-action[aria-busy="true"],
+:root[data-theme="dark"][data-accent] :is(.download-summary-card, .playlist-summary-card) .download-action[data-analyzed="true"]:not(:disabled),
+:root[data-theme="dark"][data-accent] :is(.download-summary-card, .playlist-summary-card) .download-action[data-analyzed="true"][aria-busy="true"] {
+  border-color: var(--azure-accent-hover);
+  color: #fff;
+  background: var(--azure-accent);
+  box-shadow: 0 4px 11px var(--accent-action-shadow);
+  text-shadow: none;
+}
+
+:root[data-accent] :is(.download-summary-card, .playlist-summary-card) .download-action:hover:not(:disabled),
+:root[data-theme="dark"][data-accent] :is(.download-summary-card, .playlist-summary-card) .download-action[data-analyzed="true"]:hover:not(:disabled) {
+  border-color: var(--azure-accent-active);
+  background: var(--azure-accent-hover);
+  box-shadow: 0 5px 13px var(--accent-action-shadow);
+}
+
+:root[data-accent] :is(.download-summary-card, .playlist-summary-card) .download-action:active:not(:disabled),
+:root[data-theme="dark"][data-accent] :is(.download-summary-card, .playlist-summary-card) .download-action[data-analyzed="true"]:active:not(:disabled) {
+  background: var(--azure-accent-active);
+  box-shadow: 0 2px 7px var(--accent-action-shadow);
+}
+
+:root[data-accent] :is(.download-summary-card, .playlist-summary-card) .download-action:focus-visible {
+  box-shadow: 0 4px 11px var(--accent-action-shadow), 0 0 0 3px var(--azure-focus-ring);
+}
+
+:root[data-accent] :is(.download-summary-card, .playlist-summary-card) .download-action:disabled:not([aria-busy="true"]) {
+  border-color: var(--azure-accent-border);
+  color: var(--accent-control-ink);
+  background: var(--azure-accent-soft);
+  box-shadow: none;
+}
+
+:root[data-accent] :is(.mode-tab[aria-selected="true"], .quick-preset[aria-pressed="true"]) {
+  border-color: var(--azure-accent);
+  color: var(--accent-control-ink);
+  background: var(--azure-accent-soft);
+}
+
+:root[data-accent] .mode-tab[aria-selected="true"] {
+  box-shadow: 0 0 14px var(--accent-action-shadow) !important;
+}
+
+:root[data-accent] .mode-tab[aria-selected="true"] strong {
+  color: var(--accent-control-ink);
+}
+
+:root[data-accent] .quick-preset[aria-pressed="true"] {
+  box-shadow: inset 2px 0 0 var(--azure-accent);
+}
+
+:root[data-accent] .quick-preset[aria-pressed="true"] :is(.quick-preset-copy strong, .quick-preset-icon, .quick-preset-check) {
+  color: var(--accent-control-ink);
+}
+
+:root[data-accent] :is(.mode-tab[aria-selected="true"] .mode-tab-icon, .quick-preset-icon, .quick-preset-check, .parameter-select-icon) {
+  color: var(--accent-control-ink);
+  filter: none;
+}
+
+:root[data-accent] .quick-preset-icon { background: var(--azure-accent-soft); }
+
+:root[data-accent] .parameter-select-trigger:hover:not(:disabled) {
+  border-color: var(--azure-accent-border);
+  color: var(--accent-control-ink);
+  background: var(--azure-accent-soft);
+}
+
+:root[data-accent] .parameter-select-trigger:is(:focus, :focus-visible, [aria-expanded="true"]) {
+  border-color: var(--azure-accent);
+  color: var(--accent-control-ink);
+  box-shadow: 0 0 0 3px var(--azure-focus-ring);
+}
+
+:root[data-accent] .parameter-select-option:hover:not(:disabled),
+:root[data-accent] .parameter-select-option.active:not(:disabled),
+:root[data-accent] .parameter-select-option.selected:not(:disabled) {
+  color: var(--accent-control-ink);
+  background: var(--azure-accent-soft);
+}
+
+:root[data-accent] .parameter-select-option.selected:is(.active, :hover):not(:disabled) {
+  background: color-mix(in srgb, var(--azure-accent), var(--azure-accent-soft) 78%);
+}
+
+:root[data-accent] .url-row .url-paste-button:hover:not(:disabled) {
+  border-color: var(--azure-accent-border);
+  color: var(--accent-control-ink);
+}
+
+:root[data-accent] .playlist-analysis-track > span { background: var(--azure-accent); }
+:root[data-accent] .analysis-spinner { border-top-color: var(--azure-accent); }

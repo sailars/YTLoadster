@@ -4,13 +4,14 @@ import type { HistoryItem } from "../lib/types";
 
 type Props = {
   items: HistoryItem[];
+  showThumbnails?: boolean;
   onOpenFolder: (path: string) => void;
   onRepeat: (item: HistoryItem) => void;
   onRemove: (id: string) => Promise<void> | void;
   onClear: () => Promise<void> | void;
 };
 
-export function History({ items, onOpenFolder, onRepeat, onRemove, onClear }: Props) {
+export function History({ items, showThumbnails = true, onOpenFolder, onRepeat, onRemove, onClear }: Props) {
   const { locale, t } = useI18n();
   const [confirmClear, setConfirmClear] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -57,8 +58,8 @@ export function History({ items, onOpenFolder, onRepeat, onRemove, onClear }: Pr
       ) : (
         <ol className="history-list">
           {items.map((item) => (
-            <li className="history-row" key={item.id}>
-              {item.thumbnail ? <img className="history-thumbnail" src={item.thumbnail} alt="" /> : <div className="history-thumbnail placeholder" />}
+            <li className="history-row" key={item.id} data-no-thumbnail={!showThumbnails || undefined}>
+              {showThumbnails ? (item.thumbnail ? <img className="history-thumbnail" src={item.thumbnail} alt="" /> : <div className="history-thumbnail placeholder" />) : null}
               <div className="history-main">
                 <strong title={historyTitle(item, t)}>{historyTitle(item, t)}</strong>
                 <span className="history-source" title={item.canonicalSource ?? item.url}>{item.canonicalSource ?? item.url}</span>

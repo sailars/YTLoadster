@@ -2,7 +2,7 @@ use crate::power::SleepInhibitor;
 use crate::storage::{HistoryItem, Storage};
 use crate::tools::{discover_tools, ToolConfig, ToolState};
 use crate::ytdlp::{
-    append_custom_user_agent_args, build_download_args, hide_windows_console,
+    append_custom_user_agent_args, build_download_args_with_template, hide_windows_console,
     humanize_ytdlp_error_for_browser, ytdlp_process_env, ytdlp_process_path, CookieSource,
     DownloadPreset, DownloadRequest, YtdlpRuntimeSettings,
 };
@@ -22,9 +22,9 @@ pub const DUPLICATE_AUDIO_ERROR: &str = "enqueue-error:duplicate-audio";
 pub const DUPLICATE_SUBTITLES_ERROR: &str = "enqueue-error:duplicate-subtitles";
 const OUTPUT_PATH_PREFIX: &str = "YTLOADSTER_OUTPUT|";
 const MAX_OUTPUT_FILENAME_BYTES: usize = 240;
-pub const DEFAULT_DOWNLOAD_RETRIES: u8 = 10;
+pub const DEFAULT_DOWNLOAD_RETRIES: u8 = 3;
 pub const DEFAULT_FILE_ACCESS_RETRIES: u8 = 3;
-pub const DEFAULT_FRAGMENT_RETRIES: u8 = 10;
+pub const DEFAULT_FRAGMENT_RETRIES: u8 = 3;
 pub const MAX_DOWNLOAD_RETRIES: u8 = 30;
 pub const MAX_FILE_ACCESS_RETRIES: u8 = 10;
 pub const MAX_FRAGMENT_RETRIES: u8 = 30;
@@ -1121,7 +1121,12 @@ async fn run_download(
         return;
     }
 
-    let mut args = build_download_args(&effective_request, &inventory);
+    let output_settings = app.state::<Storage>().get_settings().unwrap_or_default();
+    let mut args = build_download_args_with_template(
+        &effective_request,
+        &inventory,
+        &output_settings.filename_template,
+    );
     set_home_path_args(&mut args, &output_dir);
     add_output_tracking_args(&mut args);
     add_fragment_concurrency_args(&mut args, manager.fragment_concurrency());
@@ -1132,12 +1137,17 @@ async fn run_download(
         manager.retry_settings(),
         custom_user_agent.as_deref(),
     );
+    let proxy_url = app.state::<YtdlpRuntimeSettings>().proxy_url();
+    crate::proxy::add_config_args(&mut args, proxy_url.as_deref());
     let mut process = Command::new(ytdlp_path);
     process
         .args(args)
         .envs(ytdlp_process_env())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if proxy_url.is_some() {
+        process.stdin(std::process::Stdio::piped());
+    }
     if let Some(path) = ytdlp_process_path(&inventory, std::env::var_os("PATH")) {
         process.env("PATH", path);
     }
@@ -1159,6 +1169,15 @@ async fn run_download(
             return;
         }
     };
+
+    if let Err(error) = crate::proxy::write_config(&mut child, proxy_url.as_deref()).await {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        emit_job(&app, manager.mark_failed(job_id, error));
+        let _ = fs::remove_dir_all(&cache_dir);
+        schedule_pending_downloads(manager, app);
+        return;
+    }
 
     if let Some(pid) = child.id() {
         manager.register_process(
@@ -1215,7 +1234,8 @@ async fn run_download(
     manager.unregister_process(job_id);
     let job_state_after_exit = manager.job_state(job_id);
     let output_path = stdout_task.await.unwrap_or_default();
-    let stderr = stderr_task.await.unwrap_or_default();
+    let stderr =
+        crate::proxy::redact_error(stderr_task.await.unwrap_or_default(), proxy_url.as_deref());
 
     if job_state_after_exit == Some(JobState::Paused) {
         schedule_pending_downloads(manager, app);
@@ -1232,7 +1252,12 @@ async fn run_download(
         Ok(status) if status.success() => {
             let finalized = resolve_output_file(output_path.as_deref(), &output_dir, &request)
                 .and_then(|source| {
-                    finalize_output_without_overwrite(&source, &request.destination_dir, &request)
+                    finalize_output(
+                        &source,
+                        &request.destination_dir,
+                        &request,
+                        &output_settings.filename_collision_policy,
+                    )
                 });
 
             match finalized {
@@ -1499,10 +1524,20 @@ fn technical_filename_suffix(request: &DownloadRequest) -> Option<String> {
     (!parts.is_empty()).then(|| format!("[{}]", parts.join(" ")))
 }
 
+#[cfg(test)]
 fn finalize_output_without_overwrite(
     source: &Path,
     destination_dir: &Path,
     request: &DownloadRequest,
+) -> Result<PathBuf, String> {
+    finalize_output(source, destination_dir, request, "rename")
+}
+
+fn finalize_output(
+    source: &Path,
+    destination_dir: &Path,
+    request: &DownloadRequest,
+    collision_policy: &str,
 ) -> Result<PathBuf, String> {
     let extension = source
         .extension()
@@ -1570,6 +1605,10 @@ fn finalize_output_without_overwrite(
         }
 
         let target = destination_dir.join(filename);
+        if collision_policy == "replace" {
+            replace_output_file(source, &target).map_err(|error| error.to_string())?;
+            return Ok(target);
+        }
         match fs::hard_link(source, &target) {
             Ok(()) => {
                 let _ = fs::remove_file(source);
@@ -1587,6 +1626,38 @@ fn finalize_output_without_overwrite(
         }
     }
     unreachable!()
+}
+
+#[cfg(target_os = "windows")]
+fn replace_output_file(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let source_wide: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let target_wide: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(target_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(io::Error::other)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_output_file(source: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(source, target)
 }
 
 fn copy_file_exclusive(source: &Path, target: &Path) -> io::Result<()> {
@@ -2989,6 +3060,27 @@ mod tests {
             b"original"
         );
         assert_eq!(fs::read(target).unwrap(), b"new video");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replace_policy_atomically_replaces_existing_file() {
+        let root = unique_test_dir("replace-finalization");
+        let destination = root.join("Downloads");
+        let workspace = destination.join(".ytloadster-cache/1/output");
+        fs::create_dir_all(&workspace).unwrap();
+        let target = destination.join("Nature.webm");
+        fs::write(&target, b"original").unwrap();
+        let source = workspace.join("Nature.webm");
+        fs::write(&source, b"replacement").unwrap();
+
+        let result =
+            finalize_output(&source, &destination, &sample_download_request(), "replace").unwrap();
+
+        assert_eq!(result, target);
+        assert_eq!(fs::read(&target).unwrap(), b"replacement");
+        assert!(!source.exists());
+        assert!(!destination.join("Nature (1).webm").exists());
         let _ = fs::remove_dir_all(root);
     }
 
