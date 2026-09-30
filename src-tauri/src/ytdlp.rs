@@ -1,21 +1,141 @@
 use crate::tools::{discover_tools, ToolConfig, ToolInventory, ToolState};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-#[derive(Debug, Clone, Default)]
+const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(60);
+const ANALYSIS_TIMEOUT_CODE: &str = "analysis-error:timeout";
+const ANALYSIS_CANCELLED_CODE: &str = "analysis-error:cancelled";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AnalysisScope {
+    Single,
+    Playlist,
+}
+
+#[derive(Default)]
+struct AnalysisSession {
+    id: String,
+    processes: HashMap<String, u32>,
+}
+
+#[derive(Default)]
+pub struct AnalysisProcessManager {
+    sessions: Mutex<HashMap<AnalysisScope, AnalysisSession>>,
+}
+
+impl AnalysisProcessManager {
+    fn begin_session(&self, scope: AnalysisScope, session_id: &str) {
+        let stale_processes = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .expect("analysis process mutex poisoned");
+            if sessions
+                .get(&scope)
+                .is_some_and(|session| session.id == session_id)
+            {
+                return;
+            }
+            let stale = sessions
+                .remove(&scope)
+                .map(|session| session.processes.into_values().collect::<HashSet<_>>())
+                .unwrap_or_default();
+            sessions.insert(
+                scope,
+                AnalysisSession {
+                    id: session_id.to_string(),
+                    processes: HashMap::new(),
+                },
+            );
+            stale
+        };
+        terminate_analysis_processes(stale_processes);
+    }
+
+    fn register_process(
+        &self,
+        scope: AnalysisScope,
+        session_id: &str,
+        request_id: &str,
+        pid: u32,
+    ) -> Result<(), String> {
+        let replaced = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .expect("analysis process mutex poisoned");
+            let Some(session) = sessions.get_mut(&scope) else {
+                return Err(ANALYSIS_CANCELLED_CODE.to_string());
+            };
+            if session.id != session_id {
+                return Err(ANALYSIS_CANCELLED_CODE.to_string());
+            }
+            session.processes.insert(request_id.to_string(), pid)
+        };
+        if let Some(replaced) = replaced.filter(|replaced| *replaced != pid) {
+            terminate_analysis_process_tree(replaced);
+        }
+        Ok(())
+    }
+
+    fn unregister_process(
+        &self,
+        scope: AnalysisScope,
+        session_id: &str,
+        request_id: &str,
+        pid: u32,
+    ) {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("analysis process mutex poisoned");
+        let Some(session) = sessions.get_mut(&scope) else {
+            return;
+        };
+        if session.id == session_id && session.processes.get(request_id).copied() == Some(pid) {
+            session.processes.remove(request_id);
+        }
+    }
+
+    fn cancel_session(&self, scope: AnalysisScope, session_id: &str) {
+        let processes = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .expect("analysis process mutex poisoned");
+            if !sessions
+                .get(&scope)
+                .is_some_and(|session| session.id == session_id)
+            {
+                return;
+            }
+            sessions
+                .remove(&scope)
+                .map(|session| session.processes.into_values().collect::<HashSet<_>>())
+                .unwrap_or_default()
+        };
+        terminate_analysis_processes(processes);
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct YtdlpRuntimeSettings {
     custom_user_agent: Arc<Mutex<Option<String>>>,
+    proxy_url: Arc<Mutex<Option<String>>>,
 }
 
 impl YtdlpRuntimeSettings {
-    pub fn new(custom_user_agent: Option<String>) -> Self {
+    pub fn new(custom_user_agent: Option<String>, proxy_url: Option<String>) -> Self {
         Self {
             custom_user_agent: Arc::new(Mutex::new(custom_user_agent)),
+            proxy_url: Arc::new(Mutex::new(proxy_url)),
         }
     }
 
@@ -31,6 +151,20 @@ impl YtdlpRuntimeSettings {
             .custom_user_agent
             .lock()
             .expect("yt-dlp runtime settings mutex poisoned") = custom_user_agent;
+    }
+
+    pub fn proxy_url(&self) -> Option<String> {
+        self.proxy_url
+            .lock()
+            .expect("yt-dlp runtime settings mutex poisoned")
+            .clone()
+    }
+
+    pub fn set_proxy_url(&self, proxy_url: Option<String>) {
+        *self
+            .proxy_url
+            .lock()
+            .expect("yt-dlp runtime settings mutex poisoned") = proxy_url;
     }
 }
 
@@ -348,15 +482,23 @@ impl ProbeFailure {
 pub async fn probe_url(
     url: String,
     cookie_source: Option<CookieSource>,
+    analysis_id: String,
     app: tauri::AppHandle,
     runtime_settings: tauri::State<'_, YtdlpRuntimeSettings>,
+    analysis_manager: tauri::State<'_, AnalysisProcessManager>,
 ) -> Result<MediaInfo, String> {
+    analysis_manager.begin_session(AnalysisScope::Single, &analysis_id);
     let json = run_json_probe(
         url,
         cookie_source,
         runtime_settings.custom_user_agent(),
+        runtime_settings.proxy_url(),
         &app,
         ProbeMode::Single,
+        &analysis_manager,
+        AnalysisScope::Single,
+        &analysis_id,
+        "single",
     )
     .await
     .map_err(|error| error.user_message())?;
@@ -367,15 +509,23 @@ pub async fn probe_url(
 pub async fn probe_playlist(
     url: String,
     cookie_source: Option<CookieSource>,
+    analysis_id: String,
     app: tauri::AppHandle,
     runtime_settings: tauri::State<'_, YtdlpRuntimeSettings>,
+    analysis_manager: tauri::State<'_, AnalysisProcessManager>,
 ) -> Result<PlaylistInfo, String> {
+    analysis_manager.begin_session(AnalysisScope::Playlist, &analysis_id);
     let json = run_json_probe(
         url,
         cookie_source,
         runtime_settings.custom_user_agent(),
+        runtime_settings.proxy_url(),
         &app,
         ProbeMode::Playlist,
+        &analysis_manager,
+        AnalysisScope::Playlist,
+        &analysis_id,
+        "playlist",
     )
     .await
     .map_err(|error| error.user_message())?;
@@ -387,16 +537,24 @@ pub async fn probe_playlist_item(
     entry_id: String,
     url: String,
     cookie_source: Option<CookieSource>,
+    analysis_id: String,
+    request_id: String,
     app: tauri::AppHandle,
     runtime_settings: tauri::State<'_, YtdlpRuntimeSettings>,
+    analysis_manager: tauri::State<'_, AnalysisProcessManager>,
 ) -> Result<PlaylistItemAnalysis, String> {
     Ok(
         match run_json_probe(
             url,
             cookie_source,
             runtime_settings.custom_user_agent(),
+            runtime_settings.proxy_url(),
             &app,
             ProbeMode::Single,
+            &analysis_manager,
+            AnalysisScope::Playlist,
+            &analysis_id,
+            &request_id,
         )
         .await
         {
@@ -421,12 +579,41 @@ pub async fn probe_playlist_item(
     )
 }
 
+#[tauri::command]
+pub fn begin_playlist_analysis(
+    analysis_id: String,
+    analysis_manager: tauri::State<'_, AnalysisProcessManager>,
+) {
+    analysis_manager.begin_session(AnalysisScope::Playlist, &analysis_id);
+}
+
+#[tauri::command]
+pub fn cancel_url_analysis(
+    analysis_id: String,
+    analysis_manager: tauri::State<'_, AnalysisProcessManager>,
+) {
+    analysis_manager.cancel_session(AnalysisScope::Single, &analysis_id);
+}
+
+#[tauri::command]
+pub fn cancel_playlist_analysis(
+    analysis_id: String,
+    analysis_manager: tauri::State<'_, AnalysisProcessManager>,
+) {
+    analysis_manager.cancel_session(AnalysisScope::Playlist, &analysis_id);
+}
+
 async fn run_json_probe(
     url: String,
     cookie_source: Option<CookieSource>,
     custom_user_agent: Option<String>,
+    proxy_url: Option<String>,
     app: &tauri::AppHandle,
     mode: ProbeMode,
+    analysis_manager: &AnalysisProcessManager,
+    analysis_scope: AnalysisScope,
+    analysis_id: &str,
+    request_id: &str,
 ) -> Result<String, ProbeFailure> {
     let materialized_cookies = if matches!(&cookie_source, Some(CookieSource::YoutubeSession)) {
         Some(
@@ -461,6 +648,8 @@ async fn run_json_probe(
     let mut args = vec![
         "--encoding".to_string(),
         "utf-8".to_string(),
+        "--socket-timeout".to_string(),
+        "20".to_string(),
         "-J".to_string(),
     ];
     match mode {
@@ -473,26 +662,182 @@ async fn run_json_probe(
     append_js_runtime_args(&mut args, &inventory);
     append_cookie_args(&mut args, effective_cookie_source.as_ref());
     append_custom_user_agent_args(&mut args, custom_user_agent.as_deref());
+    crate::proxy::add_config_args(&mut args, proxy_url.as_deref());
     args.push(url);
 
     let mut process = Command::new(ytdlp_path);
-    process.args(&args).envs(ytdlp_process_env());
+    process
+        .args(&args)
+        .envs(ytdlp_process_env())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    if proxy_url.is_some() {
+        process.stdin(std::process::Stdio::piped());
+    }
+    configure_analysis_process_group(&mut process);
     hide_windows_console(&mut process);
 
-    let output = process.output().await.map_err(|error| ProbeFailure {
+    let mut child = process.spawn().map_err(|error| ProbeFailure {
         message: error.to_string(),
+        browser: browser.clone(),
+        missing_tool: false,
+    })?;
+    let pid = child.id().ok_or_else(|| ProbeFailure {
+        message: "analysis-error:process-id-unavailable".to_string(),
+        browser: browser.clone(),
+        missing_tool: false,
+    })?;
+    if let Err(message) =
+        analysis_manager.register_process(analysis_scope, analysis_id, request_id, pid)
+    {
+        terminate_analysis_process_tree(pid);
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(ProbeFailure {
+            message,
+            browser,
+            missing_tool: false,
+        });
+    }
+    if let Err(message) = crate::proxy::write_config(&mut child, proxy_url.as_deref()).await {
+        analysis_manager.unregister_process(analysis_scope, analysis_id, request_id, pid);
+        terminate_analysis_process_tree(pid);
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(ProbeFailure {
+            message,
+            browser,
+            missing_tool: false,
+        });
+    }
+    let output = collect_probe_output(child, ANALYSIS_TIMEOUT).await;
+    analysis_manager.unregister_process(analysis_scope, analysis_id, request_id, pid);
+    let output = output.map_err(|message| ProbeFailure {
+        message,
         browser: browser.clone(),
         missing_tool: false,
     })?;
     if !output.status.success() {
         return Err(ProbeFailure {
-            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            message: crate::proxy::redact_error(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                proxy_url.as_deref(),
+            ),
             browser,
             missing_tool: false,
         });
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[derive(Debug)]
+struct ProbeProcessOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+async fn collect_probe_output(
+    mut child: tokio::process::Child,
+    timeout: Duration,
+) -> Result<ProbeProcessOutput, String> {
+    let stdout_task = child.stdout.take().map(|mut stdout| {
+        tauri::async_runtime::spawn(async move {
+            let mut output = Vec::new();
+            stdout
+                .read_to_end(&mut output)
+                .await
+                .map(|_| output)
+                .map_err(|error| error.to_string())
+        })
+    });
+    let stderr_task = child.stderr.take().map(|mut stderr| {
+        tauri::async_runtime::spawn(async move {
+            let mut output = Vec::new();
+            stderr
+                .read_to_end(&mut output)
+                .await
+                .map(|_| output)
+                .map_err(|error| error.to_string())
+        })
+    });
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(result) => result.map_err(|error| error.to_string())?,
+        Err(_) => {
+            if let Some(pid) = child.id() {
+                terminate_analysis_process_tree(pid);
+            }
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+            if let Some(task) = stdout_task {
+                task.abort();
+            }
+            if let Some(task) = stderr_task {
+                task.abort();
+            }
+            return Err(ANALYSIS_TIMEOUT_CODE.to_string());
+        }
+    };
+
+    let stdout = collect_probe_stream(stdout_task).await?;
+    let stderr = collect_probe_stream(stderr_task).await?;
+    Ok(ProbeProcessOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+async fn collect_probe_stream(
+    task: Option<tauri::async_runtime::JoinHandle<Result<Vec<u8>, String>>>,
+) -> Result<Vec<u8>, String> {
+    match task {
+        Some(task) => task
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string()),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn configure_analysis_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+fn terminate_analysis_processes(processes: impl IntoIterator<Item = u32>) {
+    for pid in processes {
+        terminate_analysis_process_tree(pid);
+    }
+}
+
+fn terminate_analysis_process_tree(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+
+        let mut process = std::process::Command::new("taskkill");
+        process
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(0x0800_0000);
+        let _ = process.status();
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
 }
 
 fn failed_playlist_item(entry_id: String, failure: ProbeFailure) -> PlaylistItemAnalysis {
@@ -554,7 +899,8 @@ fn classify_probe_issue(failure: &ProbeFailure) -> ProbeIssue {
         || normalized.contains("cookies")
     {
         (ProbeIssueCode::AuthenticationRequired, false, true)
-    } else if normalized.contains("timed out")
+    } else if normalized.contains(ANALYSIS_TIMEOUT_CODE)
+        || normalized.contains("timed out")
         || normalized.contains("timeout")
         || normalized.contains("connection")
         || normalized.contains("network")
@@ -662,6 +1008,12 @@ pub fn parse_media_info(json: &str) -> Result<MediaInfo, YtdlpError> {
 
 pub fn humanize_ytdlp_error(message: &str) -> String {
     let normalized = message.to_ascii_lowercase();
+    if normalized.contains(ANALYSIS_TIMEOUT_CODE) {
+        return ANALYSIS_TIMEOUT_CODE.to_string();
+    }
+    if normalized.contains(ANALYSIS_CANCELLED_CODE) {
+        return ANALYSIS_CANCELLED_CODE.to_string();
+    }
     if normalized.contains("sign in to confirm your age")
         || normalized.contains("confirm your age to watch")
     {
@@ -770,6 +1122,14 @@ fn hide_internal_tool_name(message: &str) -> String {
 }
 
 pub fn build_download_args(request: &DownloadRequest, tools: &ToolInventory) -> Vec<String> {
+    build_download_args_with_template(request, tools, "title")
+}
+
+pub fn build_download_args_with_template(
+    request: &DownloadRequest,
+    tools: &ToolInventory,
+    template: &str,
+) -> Vec<String> {
     let mut args = vec![
         "--encoding".to_string(),
         "utf-8".to_string(),
@@ -781,7 +1141,7 @@ pub fn build_download_args(request: &DownloadRequest, tools: &ToolInventory) -> 
         "--paths".to_string(),
         format!("home:{}", request.destination_dir.to_string_lossy()),
         "-o".to_string(),
-        "%(title).200B.%(ext)s".to_string(),
+        filename_output_template(template).to_string(),
     ];
 
     if let Some(ffmpeg_path) = managed_ffmpeg_location(tools) {
@@ -815,6 +1175,32 @@ pub fn build_download_args(request: &DownloadRequest, tools: &ToolInventory) -> 
 
     args.push(request.url.clone());
     args
+}
+
+fn filename_output_template(template: &str) -> &'static str {
+    match template {
+        "title-id" => "%(title).170B [%(id|unknown)s].%(ext)s",
+        "channel-title" => "%(channel,uploader&{} - |)s%(title).140B.%(ext)s",
+        "date-title" => "%(upload_date>%Y-%m-%d&{} - |)s%(title).170B.%(ext)s",
+        _ => "%(title).200B.%(ext)s",
+    }
+}
+
+#[cfg(test)]
+mod filename_template_tests {
+    use super::filename_output_template;
+
+    #[test]
+    fn maps_supported_filename_modes_and_omits_missing_channel_or_date() {
+        assert_eq!(filename_output_template("title"), "%(title).200B.%(ext)s");
+        assert!(filename_output_template("title-id").contains("%(id|unknown)s"));
+        assert!(filename_output_template("channel-title").contains("%(channel,uploader&{} - |)s"));
+        assert!(filename_output_template("date-title").contains("%(upload_date>%Y-%m-%d&{} - |)s"));
+        assert_eq!(
+            filename_output_template("invalid"),
+            filename_output_template("title")
+        );
+    }
 }
 
 pub fn ytdlp_process_env() -> Vec<(&'static str, &'static str)> {
@@ -1423,6 +1809,7 @@ fn format_number(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
 
     #[test]
     fn appends_custom_user_agent_only_when_configured() {
@@ -1438,6 +1825,63 @@ mod tests {
     }
     use crate::tools::{ToolInventory, ToolState, ToolStatus};
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn stops_a_probe_process_when_its_time_limit_expires() {
+        #[cfg(target_os = "windows")]
+        let mut command = {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/C", "ping -n 6 127.0.0.1 > nul"]);
+            command
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut command = {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "sleep 5"]);
+            command
+        };
+        command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        configure_analysis_process_group(&mut command);
+        hide_windows_console(&mut command);
+
+        let child = command.spawn().unwrap();
+        let result = collect_probe_output(child, Duration::from_millis(50)).await;
+
+        assert_eq!(result.unwrap_err(), ANALYSIS_TIMEOUT_CODE);
+    }
+
+    #[test]
+    fn classifies_the_analysis_time_limit_as_a_retryable_network_error() {
+        let failure = ProbeFailure {
+            message: ANALYSIS_TIMEOUT_CODE.to_string(),
+            browser: None,
+            missing_tool: false,
+        };
+        let issue = classify_probe_issue(&failure);
+
+        assert_eq!(issue.code, ProbeIssueCode::Network);
+        assert!(issue.retryable);
+        assert!(!issue.requires_auth);
+        assert_eq!(failure.user_message(), ANALYSIS_TIMEOUT_CODE);
+    }
+
+    #[test]
+    fn replacing_one_analysis_section_keeps_the_other_section_active() {
+        let manager = AnalysisProcessManager::default();
+        manager.begin_session(AnalysisScope::Single, "single-old");
+        manager.begin_session(AnalysisScope::Playlist, "playlist-current");
+        manager.begin_session(AnalysisScope::Single, "single-new");
+
+        let sessions = manager
+            .sessions
+            .lock()
+            .expect("analysis process mutex poisoned");
+        assert_eq!(sessions[&AnalysisScope::Single].id, "single-new");
+        assert_eq!(sessions[&AnalysisScope::Playlist].id, "playlist-current");
+    }
 
     #[test]
     fn deserializes_every_current_frontend_video_profile() {

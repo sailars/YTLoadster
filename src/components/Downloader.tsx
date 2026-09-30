@@ -35,6 +35,7 @@ import type { VideoDownloadProfile } from "../lib/types";
 
 type Props = {
   authSettings: BrowserAuthSettings;
+  defaultDestinationDir?: string | null;
   includeVideoTechnicalDetailsInFilename: boolean;
   url: string;
   sourceIsVideo: boolean;
@@ -52,6 +53,7 @@ type DuplicateErrorState = { kind: DuplicateKind; signature: string };
 
 export function Downloader({
   authSettings,
+  defaultDestinationDir,
   includeVideoTechnicalDetailsInFilename,
   url,
   sourceIsVideo,
@@ -83,6 +85,8 @@ export function Downloader({
   const [pendingHistoryDuplicate, setPendingHistoryDuplicate] = useState<DownloadRequest | null>(null);
   const [enqueueResult, setEnqueueResult] = useState<DownloadMode | null>(null);
   const restoredRepeat = useRef<string | null>(null);
+  const previousDefaultDestinationDir = useRef<string | null>(null);
+  const analysisSequence = useRef(0);
   const currentDuplicateSignature = mediaDuplicateSignature({
     mode,
     canonicalSource: media?.webpageUrl ?? analyzedUrl ?? url,
@@ -99,11 +103,22 @@ export function Downloader({
   });
 
   useEffect(() => {
-    api.getDefaultDownloadDir().then(setDestinationDir).catch(() => setDestinationDir("Downloads"));
-  }, []);
+    if (defaultDestinationDir === undefined) {
+      api.getDefaultDownloadDir().then(setDestinationDir).catch(() => setDestinationDir("Downloads"));
+      return;
+    }
+    if (!defaultDestinationDir) return;
+    setDestinationDir((current) =>
+      !current || current === previousDefaultDestinationDir.current
+        ? defaultDestinationDir
+        : current,
+    );
+    previousDefaultDestinationDir.current = defaultDestinationDir;
+  }, [defaultDestinationDir]);
 
   useEffect(() => {
     const currentUrl = url.trim();
+    const analysisId = `single-${Date.now()}-${++analysisSequence.current}`;
     setMedia(null);
     setAnalyzedUrl(null);
     setSelectedVideoFormatId(null);
@@ -134,6 +149,7 @@ export function Downloader({
         const result = await api.probeUrl(
           currentUrl,
           makeCookieSource(authSettings),
+          analysisId,
         );
         if (!isCurrent) return;
         const bestAudioFormatId = bestFormatId(result.audioFormats);
@@ -163,6 +179,7 @@ export function Downloader({
     return () => {
       isCurrent = false;
       window.clearTimeout(timeout);
+      void api.cancelUrlAnalysis(analysisId).catch(() => undefined);
     };
   }, [url, sourceIsVideo, authSettings.useBrowserCookies, authSettings.useYoutubeSession, authSettings.browser, locale, t]);
 
@@ -512,6 +529,7 @@ export function Downloader({
             <section className="mode-section" aria-label={t("downloader.mode")}>
               <DownloadModeTabs mode={mode} onChange={changeMode} />
             </section>
+            <h3 className="download-parameters-heading">{t("playlist.parameters")}</h3>
 
             {mode === "video" ? (
               <VideoDownloadOptions
@@ -749,6 +767,9 @@ function readableError(error: unknown, browser: string | undefined, locale: AppL
   }
   if (normalized.includes("download-error:missing-ffmpeg")) {
     return t("error.missingFfmpeg");
+  }
+  if (normalized.includes("analysis-error:timeout")) {
+    return t("error.analysisTimeout");
   }
   if (isYouTubeAgeRestrictionError(message)) {
     return t("error.ageRestricted");

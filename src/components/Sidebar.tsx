@@ -3,7 +3,7 @@ import { useI18n } from "../lib/i18n";
 import type { ThemePreference } from "../lib/theme";
 import { PlaylistDownloadIcon } from "./PlaylistDownloadIcon";
 
-export type AppSection = "new" | "playlist" | "queue" | "history";
+export type AppSection = "new" | "playlist" | "queue" | "history" | "settings";
 
 type Props = {
   active: AppSection;
@@ -151,7 +151,7 @@ export function Sidebar({
             themeToggle
             onClick={onTheme}
           />
-          <SidebarUtility label={t("app.settings")} icon="settings" onClick={onSettings} />
+          <SidebarUtility label={t("app.settings")} icon="settings" active={active === "settings"} onClick={onSettings} />
         </div>
       </nav>
     </div>
@@ -176,6 +176,7 @@ function SidebarUtility({
   ariaLabel,
   icon,
   pressed,
+  active = false,
   disabled = false,
   themeToggle = false,
   onClick,
@@ -184,6 +185,7 @@ function SidebarUtility({
   ariaLabel?: string;
   icon: IconName;
   pressed?: boolean;
+  active?: boolean;
   disabled?: boolean;
   themeToggle?: boolean;
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
@@ -194,9 +196,11 @@ function SidebarUtility({
       className="sidebar-item sidebar-utility"
       aria-label={ariaLabel ?? label}
       aria-pressed={pressed}
+      aria-current={active ? "page" : undefined}
       aria-disabled={disabled || undefined}
       aria-busy={disabled || undefined}
       data-theme-toggle={themeToggle || undefined}
+      data-active={active || undefined}
       title={ariaLabel ?? label}
       onClick={(event) => {
         if (!disabled) onClick(event);

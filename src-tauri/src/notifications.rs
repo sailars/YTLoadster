@@ -41,6 +41,7 @@ pub fn show_system_notification(app: AppHandle, title: String, body: String) -> 
         tauri_winrt_notification::Toast::new(identifier)
             .title(title)
             .text1(body)
+            .sound(None)
             .show()
             .map_err(|error| format!("Windows не удалось показать уведомление: {error}"))?;
         return Ok(());
@@ -55,6 +56,25 @@ pub fn show_system_notification(app: AppHandle, title: String, body: String) -> 
             .show()
             .map_err(|error| format!("не удалось показать системное уведомление: {error}"))
     }
+}
+
+#[tauri::command]
+pub fn play_completion_sound() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Diagnostics::Debug::MessageBeep;
+        use windows::Win32::UI::WindowsAndMessaging::MB_OK;
+        unsafe { MessageBeep(MB_OK) }.map_err(|error| error.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        #[link(name = "AppKit", kind = "framework")]
+        extern "C" {
+            fn NSBeep();
+        }
+        NSBeep();
+    }
+    Ok(())
 }
 
 #[cfg(test)]

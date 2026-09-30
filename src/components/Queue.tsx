@@ -14,6 +14,7 @@ const missingFfmpegError = "download-error:missing-ffmpeg";
 
 type Props = {
   jobs: Job[];
+  showThumbnails?: boolean;
   onCancel: (id: number) => void;
   onPause: (id: number) => void;
   onResume: (id: number) => void;
@@ -28,6 +29,7 @@ type Props = {
 
 export function Queue({
   jobs,
+  showThumbnails = true,
   onCancel,
   onPause,
   onResume,
@@ -141,6 +143,7 @@ export function Queue({
                   <QueueRow
                     key={job.id}
                     job={job}
+                    showThumbnails={showThumbnails}
                     onCancel={onCancel}
                     onPause={onPause}
                     onResume={onResume}
@@ -159,6 +162,7 @@ export function Queue({
 
 function QueueRow({
   job,
+  showThumbnails,
   onCancel,
   onPause,
   onResume,
@@ -166,6 +170,7 @@ function QueueRow({
   onRetry,
 }: {
   job: Job;
+  showThumbnails: boolean;
   onCancel: (id: number) => void;
   onPause: (id: number) => void;
   onResume: (id: number) => void;
@@ -175,14 +180,14 @@ function QueueRow({
   const { locale, t } = useI18n();
   const title = job.request?.title ?? t("queue.untitled");
   return (
-    <li className="job-row" data-state={job.state.toLowerCase()}>
-      <MediaThumbnail
+    <li className="job-row" data-state={job.state.toLowerCase()} data-no-thumbnail={!showThumbnails || undefined}>
+      {showThumbnails ? <MediaThumbnail
         src={job.request?.thumbnail}
         mediaUrl={job.request?.canonicalSource ?? job.request?.url}
         alt={t("queue.preview", { title })}
         className="queue-thumbnail"
         placeholderClassName="queue-thumbnail placeholder"
-      />
+      /> : null}
       <div className="job-main">
         <div className="queue-job-heading">
           <QueueJobTitle title={title} jobId={job.id} />

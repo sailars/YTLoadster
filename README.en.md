@@ -24,6 +24,12 @@ YTLoadster is a desktop application for downloading video, audio, and subtitles 
 - Authentication using browser cookies.
 - YouTube sign-in through an isolated browser profile that does not affect the user's regular profile.
 
+## Settings in the v0.1.2 branch
+
+Settings open as a section in the sidebar. General contains language, completion sound, sleep prevention, close-to-tray, and automatic update checks. Downloads lets you choose a default folder for new single downloads and playlists, a filename template, what to do when a name exists (rename or replace), concurrent downloads and fragments, playlist format matching, and retry counts. You can still choose a different folder for an individual download before adding it to the queue.
+
+Network offers system proxy, no proxy, and manual HTTP, HTTPS, or SOCKS5 with username and password, as well as a custom User-Agent. System proxy and no proxy apply immediately; enter the details and press "Save" for a manual proxy. No proxy means that the application adds no proxy of its own; it does not disable system routing, VPNs, or system proxy clients. Proxy passwords are protected by Windows DPAPI or the macOS Keychain. Authorization contains the existing sign-in options. Appearance offers theme, accent color, and thumbnails in Playlist, Queue, and History. The queue is not restored after an app restart yet.
+
 ## Platforms and releases
 
 - **Windows 10/11 x64** - distributed as a portable archive.
@@ -66,6 +72,8 @@ npm.cmd run tauri -- dev
 
 Run these commands from the repository root. On macOS and Linux, use `npm` instead of `npm.cmd`.
 
+On Windows, Rust build output and its cache use `G:\ytloadster_dev`. The launch command sets this path regardless of the inherited `CARGO_TARGET_DIR`; drive G must be available. Run Rust checks with `npm.cmd run cargo -- test --manifest-path src-tauri/Cargo.toml`, adding a test filter when needed.
+
 ## Privacy and YouTube sign-in
 
 For the "Sign in to YouTube" flow, the application opens an isolated profile in the default installed Chromium-based browser. After sign-in, only YouTube cookies are stored: they are protected by DPAPI on Windows and by the system Keychain on macOS. The application does not receive the user's password and does not modify the regular browser profile or any already open browser windows.
@@ -75,6 +83,10 @@ Reading cookies from a regular browser is intended for occasional use. macOS may
 ## Third-party components
 
 Release builds use `yt-dlp`, Deno, FFmpeg, and FFprobe; the macOS FFmpeg build also uses LAME for MP3 support. All tools are included in the application package. Their distribution terms are described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The approved frontend and Rust dependency graph is recorded in [licenses/DEPENDENCIES.md](licenses/DEPENDENCIES.md); notices for frontend components are available in [licenses/FRONTEND_LICENSES.txt](licenses/FRONTEND_LICENSES.txt), and the complete report with Rust component license texts is available in [licenses/DEPENDENCY_LICENSES.html](licenses/DEPENDENCY_LICENSES.html).
+
+The "Settings" → "About" section has a separate component update check. After checking, you can install available `yt-dlp`, Deno, and FFmpeg/FFprobe updates without updating YTLoadster. On Windows, FFmpeg comes from BtbN's LGPL shared builds. On macOS, FFmpeg/FFprobe and LAME update together from a verified YTLoadster component release when one is published. If there is no compatible release, the app reports that update information is unavailable.
+
+Downloads are verified against the SHA-256 digest from GitHub Releases and launched to check their versions. On Windows, an update replaces the original components in the portable application folder; FFmpeg, FFprobe, and the DLLs are replaced together. The application folder must be writable. On macOS, updates are stored in the user's application data directory to leave the `.app` unchanged. Running jobs finish with their already started components; new jobs use the installed version. Component checks run only when you press the button.
 
 ## License
 

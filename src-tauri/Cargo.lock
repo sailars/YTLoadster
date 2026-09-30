@@ -5508,7 +5508,7 @@ dependencies = [
 
 [[package]]
 name = "ytloadster"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "block2",
  "core-foundation 0.10.1",
@@ -5516,12 +5516,14 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "percent-encoding",
  "reqwest",
  "rusqlite",
  "security-framework",
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
@@ -5529,6 +5531,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-winrt-notification",
  "tokio",
+ "url",
  "windows",
  "windows-registry",
 ]

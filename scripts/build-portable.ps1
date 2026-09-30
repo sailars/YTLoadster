@@ -1,4 +1,6 @@
-param()
+param(
+  [string]$CargoTargetDir = "G:\ytloadster_dev"
+)
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -11,6 +13,18 @@ $releaseDir = Join-Path $projectRoot "release"
 $packageName = "YTLoadster-$version-windows-x64-portable"
 $stagingDir = Join-Path $releaseDir $packageName
 $archivePath = Join-Path $releaseDir "$packageName.zip"
+
+if ($CargoTargetDir -notmatch '^[A-Za-z]:[\\/]') {
+  throw "Каталог сборки Rust должен быть абсолютным путём: $CargoTargetDir"
+}
+try {
+  New-Item -ItemType Directory -Path $CargoTargetDir -Force -ErrorAction Stop | Out-Null
+  $cargoTargetDir = (Resolve-Path -LiteralPath $CargoTargetDir -ErrorAction Stop).Path
+} catch {
+  throw "Не удалось открыть каталог сборки Rust $CargoTargetDir. Сборка в каталоге проекта не запускается."
+}
+$env:CARGO_TARGET_DIR = $cargoTargetDir
+Write-Host "Каталог сборки Rust: $cargoTargetDir"
 
 foreach ($document in @(
   "LICENSE",
@@ -53,20 +67,15 @@ if ((Test-Path -LiteralPath $stagingDir) -or (Test-Path -LiteralPath $archivePat
 
 Push-Location $projectRoot
 try {
-  & npm.cmd run tauri -- build --no-bundle
+  # Прямой вызов CLI сохраняет явно выбранный release-каталог;
+  # npm-команда для разработки всегда закрепляет G:\ytloadster_dev.
+  & node (Join-Path $projectRoot "node_modules\@tauri-apps\cli\tauri.js") build --no-bundle
   if ($LASTEXITCODE -ne 0) {
     throw "Сборка Tauri завершилась с кодом $LASTEXITCODE."
   }
 }
 finally {
   Pop-Location
-}
-
-$cargoTargetDir = $env:CARGO_TARGET_DIR
-if ([string]::IsNullOrWhiteSpace($cargoTargetDir)) {
-  $cargoTargetDir = Join-Path $projectRoot "src-tauri\target"
-} elseif (-not [System.IO.Path]::IsPathRooted($cargoTargetDir)) {
-  $cargoTargetDir = Join-Path $projectRoot $cargoTargetDir
 }
 
 $applicationExe = Join-Path $cargoTargetDir "release\YTLoadster.exe"

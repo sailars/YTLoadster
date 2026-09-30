@@ -23,6 +23,23 @@ export type UpdateCheckState = {
   result?: UpdateCheckResult;
 };
 
+export type ComponentId = "ytdlp" | "deno" | "ffmpeg";
+
+export type ComponentUpdateStatus = {
+  id: ComponentId;
+  currentVersion: string | null;
+  latestVersion: string | null;
+  state: "available" | "upToDate" | "unavailable";
+  sourceUrl: string | null;
+};
+
+export type ComponentUpdateCheckState = {
+  status: "idle" | "checking" | "ready" | "error";
+  results: ComponentUpdateStatus[];
+  installingId: ComponentId | null;
+  installErrorId: ComponentId | null;
+};
+
 export type ToolStatus = {
   name: string;
   path?: string | null;
@@ -158,14 +175,24 @@ export type AppSettings = {
   customUserAgentEnabled: boolean;
   customUserAgent: string;
   includeVideoTechnicalDetailsInFilename: boolean;
+  filenameTemplate: "title" | "title-id" | "channel-title" | "date-title";
+  filenameCollisionPolicy: "rename" | "replace";
   playlistFormatSelectionMode: PlaylistFormatSelectionMode;
   preventSystemSleepWhileDownloading: boolean;
   minimizeToTray: boolean;
+  completionSoundEnabled: boolean;
+  showThumbnails: boolean;
+  accentColor: "blue" | "purple" | "cyan" | "green" | "orange" | "pink";
+  proxyMode: "system" | "none" | "http" | "https" | "socks5";
+  proxyHost: string;
+  proxyPort: number;
+  proxyUsername: string;
+  proxyPasswordSet: boolean;
 };
 
 export type PlaylistFormatSelectionMode = "strict" | "adaptive";
 
-export type SettingsPatch = Partial<AppSettings>;
+export type SettingsPatch = Partial<AppSettings> & { proxyPassword?: string };
 
 export type VideoTechnicalDetails = {
   height?: number | null;

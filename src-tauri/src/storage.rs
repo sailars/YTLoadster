@@ -32,9 +32,19 @@ pub struct Settings {
     pub custom_user_agent_enabled: bool,
     pub custom_user_agent: String,
     pub include_video_technical_details_in_filename: bool,
+    pub filename_template: String,
+    pub filename_collision_policy: String,
     pub playlist_format_selection_mode: String,
     pub prevent_system_sleep_while_downloading: bool,
     pub minimize_to_tray: bool,
+    pub completion_sound_enabled: bool,
+    pub show_thumbnails: bool,
+    pub accent_color: String,
+    pub proxy_mode: String,
+    pub proxy_host: String,
+    pub proxy_port: u16,
+    pub proxy_username: String,
+    pub proxy_password_set: bool,
 }
 
 impl Settings {
@@ -60,14 +70,24 @@ impl Default for Settings {
             custom_user_agent_enabled: false,
             custom_user_agent: String::new(),
             include_video_technical_details_in_filename: false,
+            filename_template: "title".to_string(),
+            filename_collision_policy: "rename".to_string(),
             playlist_format_selection_mode: "strict".to_string(),
             prevent_system_sleep_while_downloading: false,
             minimize_to_tray: true,
+            completion_sound_enabled: false,
+            show_thumbnails: true,
+            accent_color: "blue".to_string(),
+            proxy_mode: "system".to_string(),
+            proxy_host: String::new(),
+            proxy_port: 0,
+            proxy_username: String::new(),
+            proxy_password_set: false,
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsPatch {
     pub default_download_dir: Option<PathBuf>,
@@ -82,9 +102,19 @@ pub struct SettingsPatch {
     pub custom_user_agent_enabled: Option<bool>,
     pub custom_user_agent: Option<String>,
     pub include_video_technical_details_in_filename: Option<bool>,
+    pub filename_template: Option<String>,
+    pub filename_collision_policy: Option<String>,
     pub playlist_format_selection_mode: Option<String>,
     pub prevent_system_sleep_while_downloading: Option<bool>,
     pub minimize_to_tray: Option<bool>,
+    pub completion_sound_enabled: Option<bool>,
+    pub show_thumbnails: Option<bool>,
+    pub accent_color: Option<String>,
+    pub proxy_mode: Option<String>,
+    pub proxy_host: Option<String>,
+    pub proxy_port: Option<u16>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -188,6 +218,17 @@ impl Storage {
             )?
             .map(|value| value == "true" || value == "1")
             .unwrap_or(false),
+            filename_template: get_string_setting(&conn, "filename_template")?
+                .filter(|value| {
+                    matches!(
+                        value.as_str(),
+                        "title" | "title-id" | "channel-title" | "date-title"
+                    )
+                })
+                .unwrap_or_else(|| "title".to_string()),
+            filename_collision_policy: get_string_setting(&conn, "filename_collision_policy")?
+                .filter(|value| matches!(value.as_str(), "rename" | "replace"))
+                .unwrap_or_else(|| "rename".to_string()),
             playlist_format_selection_mode: normalize_playlist_format_selection_mode(
                 get_string_setting(&conn, "playlist_format_selection_mode")?.as_deref(),
             )
@@ -201,7 +242,54 @@ impl Storage {
             minimize_to_tray: get_string_setting(&conn, "minimize_to_tray")?
                 .map(|value| value == "true" || value == "1")
                 .unwrap_or(true),
+            completion_sound_enabled: get_string_setting(&conn, "completion_sound_enabled")?
+                .map(|value| value == "true" || value == "1")
+                .unwrap_or(false),
+            show_thumbnails: get_string_setting(&conn, "show_thumbnails")?
+                .map(|value| value == "true" || value == "1")
+                .unwrap_or(true),
+            accent_color: get_string_setting(&conn, "accent_color")?
+                .filter(|value| {
+                    matches!(
+                        value.as_str(),
+                        "blue" | "purple" | "cyan" | "green" | "orange" | "pink"
+                    )
+                })
+                .unwrap_or_else(|| "blue".to_string()),
+            proxy_mode: get_string_setting(&conn, "proxy_mode")?
+                .filter(|value| {
+                    matches!(
+                        value.as_str(),
+                        "system" | "none" | "http" | "https" | "socks5"
+                    )
+                })
+                .unwrap_or_else(|| "system".to_string()),
+            proxy_host: get_string_setting(&conn, "proxy_host")?.unwrap_or_default(),
+            proxy_port: get_string_setting(&conn, "proxy_port")?
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            proxy_username: get_string_setting(&conn, "proxy_username")?.unwrap_or_default(),
+            proxy_password_set: get_string_setting(&conn, "proxy_password_set")?
+                .map(|value| value == "true" || value == "1")
+                .unwrap_or(false),
         })
+    }
+
+    pub fn effective_download_dir(&self) -> Result<PathBuf, String> {
+        match self.get_settings()?.default_download_dir {
+            Some(path) => Ok(path),
+            None => default_download_dir(),
+        }
+    }
+
+    pub fn effective_proxy_url(&self) -> Result<Option<String>, String> {
+        let settings = self.get_settings()?;
+        if matches!(settings.proxy_mode.as_str(), "system" | "none") {
+            return crate::proxy::url_for_settings(&settings, None);
+        }
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let password = crate::proxy::load_password(&conn)?;
+        crate::proxy::url_for_settings(&settings, password.as_deref())
     }
 
     pub fn update_settings(&self, patch: SettingsPatch) -> Result<Settings, String> {
@@ -222,6 +310,75 @@ impl Storage {
             .unwrap_or(current_custom_user_agent_enabled);
         if next_custom_user_agent_enabled && normalized_custom_user_agent.is_empty() {
             return Err("settings-error:custom-user-agent-required".to_string());
+        }
+        let next_proxy_mode = patch
+            .proxy_mode
+            .clone()
+            .or(get_string_setting(&conn, "proxy_mode")?)
+            .unwrap_or_else(|| "system".to_string());
+        if !matches!(
+            next_proxy_mode.as_str(),
+            "system" | "none" | "http" | "https" | "socks5"
+        ) {
+            return Err("settings-error:invalid-proxy-mode".to_string());
+        }
+        if !matches!(next_proxy_mode.as_str(), "system" | "none") {
+            let next_host = patch
+                .proxy_host
+                .clone()
+                .or(get_string_setting(&conn, "proxy_host")?)
+                .unwrap_or_default();
+            let next_port = patch
+                .proxy_port
+                .or(get_string_setting(&conn, "proxy_port")?.and_then(|value| value.parse().ok()))
+                .unwrap_or(0);
+            if crate::proxy::validate_host(&next_host)?.is_empty() || next_port == 0 {
+                return Err("settings-error:incomplete-proxy".to_string());
+            }
+            let next_username = patch
+                .proxy_username
+                .clone()
+                .or(get_string_setting(&conn, "proxy_username")?)
+                .unwrap_or_default();
+            let password_set = patch
+                .proxy_password
+                .as_ref()
+                .map(|value| !value.is_empty())
+                .unwrap_or(
+                    get_string_setting(&conn, "proxy_password_set")?.as_deref() == Some("true"),
+                );
+            if password_set && crate::proxy::validate_username(&next_username)?.is_empty() {
+                return Err("settings-error:proxy-username-required".to_string());
+            }
+        }
+        if let Some(host) = patch.proxy_host.as_deref() {
+            crate::proxy::validate_host(host)?;
+        }
+        if let Some(username) = patch.proxy_username.as_deref() {
+            crate::proxy::validate_username(username)?;
+        }
+        if let Some(password) = patch.proxy_password.as_deref() {
+            crate::proxy::validate_password(password)?;
+        }
+        if patch.filename_template.as_deref().is_some_and(|value| {
+            !matches!(value, "title" | "title-id" | "channel-title" | "date-title")
+        }) {
+            return Err("settings-error:invalid-filename-template".to_string());
+        }
+        if patch
+            .filename_collision_policy
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "rename" | "replace"))
+        {
+            return Err("settings-error:invalid-collision-policy".to_string());
+        }
+        if patch.accent_color.as_deref().is_some_and(|value| {
+            !matches!(
+                value,
+                "blue" | "purple" | "cyan" | "green" | "orange" | "pink"
+            )
+        }) {
+            return Err("settings-error:invalid-accent-color".to_string());
         }
         upsert_path_setting(
             &conn,
@@ -283,6 +440,21 @@ impl Storage {
                 if include { "true" } else { "false" },
             )?;
         }
+        if let Some(template) = patch.filename_template {
+            if !matches!(
+                template.as_str(),
+                "title" | "title-id" | "channel-title" | "date-title"
+            ) {
+                return Err("settings-error:invalid-filename-template".to_string());
+            }
+            upsert_string_setting(&conn, "filename_template", &template)?;
+        }
+        if let Some(policy) = patch.filename_collision_policy {
+            if !matches!(policy.as_str(), "rename" | "replace") {
+                return Err("settings-error:invalid-collision-policy".to_string());
+            }
+            upsert_string_setting(&conn, "filename_collision_policy", &policy)?;
+        }
         if let Some(mode) = patch.playlist_format_selection_mode {
             upsert_string_setting(
                 &conn,
@@ -303,6 +475,46 @@ impl Storage {
                 "minimize_to_tray",
                 if enabled { "true" } else { "false" },
             )?;
+        }
+        for (key, value) in [
+            ("completion_sound_enabled", patch.completion_sound_enabled),
+            ("show_thumbnails", patch.show_thumbnails),
+        ] {
+            if let Some(enabled) = value {
+                upsert_string_setting(&conn, key, if enabled { "true" } else { "false" })?;
+            }
+        }
+        if let Some(color) = patch.accent_color {
+            if !matches!(
+                color.as_str(),
+                "blue" | "purple" | "cyan" | "green" | "orange" | "pink"
+            ) {
+                return Err("settings-error:invalid-accent-color".to_string());
+            }
+            upsert_string_setting(&conn, "accent_color", &color)?;
+        }
+        if let Some(mode) = patch.proxy_mode {
+            if !matches!(
+                mode.as_str(),
+                "system" | "none" | "http" | "https" | "socks5"
+            ) {
+                return Err("settings-error:invalid-proxy-mode".to_string());
+            }
+            upsert_string_setting(&conn, "proxy_mode", &mode)?;
+        }
+        if let Some(host) = patch.proxy_host {
+            let host = crate::proxy::validate_host(&host)?;
+            upsert_string_setting(&conn, "proxy_host", &host)?;
+        }
+        if let Some(port) = patch.proxy_port {
+            upsert_string_setting(&conn, "proxy_port", &port.to_string())?;
+        }
+        if let Some(username) = patch.proxy_username {
+            let username = crate::proxy::validate_username(&username)?;
+            upsert_string_setting(&conn, "proxy_username", &username)?;
+        }
+        if let Some(password) = patch.proxy_password {
+            crate::proxy::save_password(&conn, &password)?;
         }
         drop(conn);
         self.get_settings()
@@ -690,6 +902,7 @@ pub fn update_settings(
     app: AppHandle,
 ) -> Result<Settings, String> {
     let settings = storage.update_settings(patch)?;
+    let proxy_url = storage.effective_proxy_url()?;
     manager.set_concurrency(settings.concurrency);
     manager.set_fragment_concurrency(settings.fragment_concurrency);
     manager.set_retry_settings(
@@ -698,6 +911,7 @@ pub fn update_settings(
         settings.fragment_retries,
     );
     ytdlp_runtime_settings.set_custom_user_agent(settings.effective_custom_user_agent());
+    ytdlp_runtime_settings.set_proxy_url(proxy_url);
     sleep_inhibitor.set_enabled(settings.prevent_system_sleep_while_downloading);
     tray.set_enabled(settings.minimize_to_tray);
     schedule_pending_downloads(manager.inner().clone(), app);
@@ -705,8 +919,8 @@ pub fn update_settings(
 }
 
 #[tauri::command]
-pub fn get_default_download_dir() -> Result<PathBuf, String> {
-    default_download_dir()
+pub fn get_default_download_dir(storage: State<'_, Storage>) -> Result<PathBuf, String> {
+    storage.effective_download_dir()
 }
 
 pub fn default_download_dir() -> Result<PathBuf, String> {
@@ -729,7 +943,7 @@ fn get_path_setting(conn: &Connection, key: &str) -> Result<Option<PathBuf>, Str
     Ok(get_string_setting(conn, key)?.map(PathBuf::from))
 }
 
-fn get_string_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+pub(crate) fn get_string_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
     let mut statement = conn
         .prepare("SELECT value FROM settings WHERE key = ?1")
         .map_err(|err| err.to_string())?;
@@ -754,7 +968,11 @@ fn upsert_path_setting(
     }
 }
 
-fn upsert_string_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+pub(crate) fn upsert_string_setting(
+    conn: &Connection,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -806,6 +1024,95 @@ mod tests {
             settings.default_download_dir,
             Some(PathBuf::from("C:/Downloads"))
         );
+        assert_eq!(
+            storage.effective_download_dir().unwrap(),
+            PathBuf::from("C:/Downloads")
+        );
+    }
+
+    #[test]
+    fn saves_filename_and_appearance_preferences() {
+        let storage = Storage::open_in_memory().unwrap();
+        storage
+            .update_settings(SettingsPatch {
+                filename_template: Some("channel-title".to_string()),
+                filename_collision_policy: Some("replace".to_string()),
+                completion_sound_enabled: Some(true),
+                show_thumbnails: Some(false),
+                accent_color: Some("purple".to_string()),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        let settings = storage.get_settings().unwrap();
+        assert_eq!(settings.filename_template, "channel-title");
+        assert_eq!(settings.filename_collision_policy, "replace");
+        assert!(settings.completion_sound_enabled);
+        assert!(!settings.show_thumbnails);
+        assert_eq!(settings.accent_color, "purple");
+    }
+
+    #[test]
+    fn rejects_incomplete_proxy_without_changing_active_mode() {
+        let storage = Storage::open_in_memory().unwrap();
+        assert_eq!(
+            storage
+                .update_settings(SettingsPatch {
+                    proxy_mode: Some("socks5".to_string()),
+                    ..SettingsPatch::default()
+                })
+                .unwrap_err(),
+            "settings-error:incomplete-proxy"
+        );
+        assert_eq!(storage.get_settings().unwrap().proxy_mode, "system");
+    }
+
+    #[test]
+    fn requires_a_proxy_username_for_a_saved_password() {
+        let storage = Storage::open_in_memory().unwrap();
+        assert_eq!(
+            storage
+                .update_settings(SettingsPatch {
+                    proxy_mode: Some("http".to_string()),
+                    proxy_host: Some("proxy.example".to_string()),
+                    proxy_port: Some(8080),
+                    proxy_password: Some("secret".to_string()),
+                    ..SettingsPatch::default()
+                })
+                .unwrap_err(),
+            "settings-error:proxy-username-required"
+        );
+        assert_eq!(storage.get_settings().unwrap().proxy_mode, "system");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn authenticated_proxy_settings_build_the_effective_url_and_can_be_cleared() {
+        let storage = Storage::open_in_memory().unwrap();
+        let settings = storage
+            .update_settings(SettingsPatch {
+                proxy_mode: Some("socks5".to_string()),
+                proxy_host: Some("127.0.0.1".to_string()),
+                proxy_port: Some(1080),
+                proxy_username: Some("user@example".to_string()),
+                proxy_password: Some("p@ss".to_string()),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert!(settings.proxy_password_set);
+        assert_eq!(
+            storage.effective_proxy_url().unwrap().as_deref(),
+            Some("socks5://user%40example:p%40ss@127.0.0.1:1080")
+        );
+
+        let settings = storage
+            .update_settings(SettingsPatch {
+                proxy_mode: Some("none".to_string()),
+                proxy_password: Some(String::new()),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert!(!settings.proxy_password_set);
+        assert_eq!(storage.effective_proxy_url().unwrap(), None);
     }
 
     #[test]
@@ -874,9 +1181,9 @@ mod tests {
     fn retry_settings_use_ytdlp_defaults_and_are_persisted() {
         let storage = Storage::open_in_memory().unwrap();
         let defaults = storage.get_settings().unwrap();
-        assert_eq!(defaults.download_retries, 10);
+        assert_eq!(defaults.download_retries, 3);
         assert_eq!(defaults.file_access_retries, 3);
-        assert_eq!(defaults.fragment_retries, 10);
+        assert_eq!(defaults.fragment_retries, 3);
 
         storage
             .update_settings(SettingsPatch {
