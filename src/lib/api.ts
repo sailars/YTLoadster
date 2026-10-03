@@ -142,11 +142,8 @@ export const api = {
   openExternalUrl(url: string) {
     return invoke<void>("open_external_url", { url });
   },
-  showSystemNotification(title: string, body: string) {
-    return invoke<void>("show_system_notification", { title, body });
-  },
-  playCompletionSound() {
-    return invoke<void>("play_completion_sound");
+  showSystemNotification(title: string, body: string, sound: boolean) {
+    return invoke<void>("show_system_notification", { title, body, sound });
   },
   getYoutubeAuthStatus() {
     return invoke<YoutubeAuthStatus>("get_youtube_auth_status");

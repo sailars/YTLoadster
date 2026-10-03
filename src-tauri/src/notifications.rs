@@ -26,7 +26,12 @@ fn register_windows_notification_identity(
 }
 
 #[tauri::command]
-pub fn show_system_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
+pub fn show_system_notification(
+    app: AppHandle,
+    title: String,
+    body: String,
+    sound: bool,
+) -> Result<(), String> {
     let title = title.trim();
     let body = body.trim();
     if title.is_empty() || body.is_empty() {
@@ -41,7 +46,7 @@ pub fn show_system_notification(app: AppHandle, title: String, body: String) -> 
         tauri_winrt_notification::Toast::new(identifier)
             .title(title)
             .text1(body)
-            .sound(None)
+            .sound(sound.then_some(tauri_winrt_notification::Sound::Default))
             .show()
             .map_err(|error| format!("Windows не удалось показать уведомление: {error}"))?;
         return Ok(());
@@ -49,32 +54,19 @@ pub fn show_system_notification(app: AppHandle, title: String, body: String) -> 
 
     #[cfg(not(target_os = "windows"))]
     {
-        app.notification()
-            .builder()
-            .title(title)
-            .body(body)
+        let notification = app.notification().builder().title(title).body(body);
+        #[cfg(target_os = "macos")]
+        let notification = if sound {
+            notification.sound("NSUserNotificationDefaultSoundName")
+        } else {
+            notification
+        };
+        #[cfg(not(target_os = "macos"))]
+        let _ = sound;
+        notification
             .show()
             .map_err(|error| format!("не удалось показать системное уведомление: {error}"))
     }
-}
-
-#[tauri::command]
-pub fn play_completion_sound() -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::System::Diagnostics::Debug::MessageBeep;
-        use windows::Win32::UI::WindowsAndMessaging::MB_OK;
-        unsafe { MessageBeep(MB_OK) }.map_err(|error| error.to_string())?;
-    }
-    #[cfg(target_os = "macos")]
-    unsafe {
-        #[link(name = "AppKit", kind = "framework")]
-        extern "C" {
-            fn NSBeep();
-        }
-        NSBeep();
-    }
-    Ok(())
 }
 
 #[cfg(test)]

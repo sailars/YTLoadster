@@ -21,6 +21,7 @@ type Props = {
   isOpen: boolean;
   settings: BrowserAuthSettings;
   downloadSettings: AppSettings;
+  notificationPending: boolean;
   platform: string;
   locale: AppLocale;
   theme: ThemePreference;
@@ -83,6 +84,7 @@ export function SettingsPanel({
   isOpen,
   settings,
   downloadSettings,
+  notificationPending,
   platform,
   locale,
   theme,
@@ -243,6 +245,7 @@ export function SettingsPanel({
               <label className="settings-switch-row">
                 <span>{t("settings.completionSound")}</span>
                 <SettingsSwitch role="switch" checked={downloadSettings.completionSoundEnabled}
+                  disabled={notificationPending}
                   onChange={(checked) => { void onDownloadSettingsChange({ completionSoundEnabled: checked }); }} />
               </label>
             </section>

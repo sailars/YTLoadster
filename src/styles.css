@@ -610,7 +610,8 @@ button:disabled {
   transform: translateY(0);
 }
 
-.clear-queue-button svg {
+.clear-queue-button svg,
+.history-header > .secondary svg {
   color: #e5485d;
 }
 
@@ -4700,7 +4701,8 @@ button.secondary.theme-button:active {
 
 :root[data-theme="dark"] .danger-action,
 :root[data-theme="dark"] .danger-queue-button svg,
-:root[data-theme="dark"] .clear-queue-button svg {
+:root[data-theme="dark"] .clear-queue-button svg,
+:root[data-theme="dark"] .history-header > .secondary svg {
   color: #e47a7f;
 }
 
