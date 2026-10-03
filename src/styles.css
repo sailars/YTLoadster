@@ -6450,6 +6450,132 @@ button.secondary:not(.icon-button):not(.theme-button),
   margin-bottom: 0;
 }
 
+.notice-countdown {
+  --notice-spark-color: #cc7910;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  overflow: visible;
+  color: inherit;
+}
+
+.notice-countdown-track,
+.notice-countdown-arc {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.notice-countdown-track {
+  opacity: 0.14;
+}
+
+.notice-countdown-arc {
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  transform: rotate(-90deg);
+  transform-origin: 12px 12px;
+  animation: notice-countdown-drain var(--notice-countdown-duration) linear forwards;
+}
+
+.notice-countdown-tip {
+  transform-origin: 12px 12px;
+  animation: notice-countdown-travel var(--notice-countdown-duration) linear forwards;
+}
+
+.notice-countdown-ember {
+  fill: var(--notice-spark-color);
+  filter: drop-shadow(0 0 1.5px var(--notice-spark-color));
+}
+
+.notice-countdown-spark {
+  fill: var(--notice-spark-color);
+  stroke: var(--notice-spark-color);
+  stroke-width: 0.9;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 0.8px var(--notice-spark-color));
+  transform-origin: 0 0;
+  animation: notice-countdown-scatter var(--spark-life) linear var(--spark-delay) infinite;
+}
+
+:root[data-theme="dark"] .notice-countdown {
+  --notice-spark-color: #ffd48a;
+}
+
+.single-enqueue-result > strong,
+.playlist-batch-feedback > div {
+  flex: 1;
+  min-width: 0;
+}
+
+@keyframes notice-countdown-drain {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: 100; }
+}
+
+@keyframes notice-countdown-travel {
+  from { transform: rotate(360deg); }
+  to { transform: rotate(0deg); }
+}
+
+@keyframes notice-countdown-scatter {
+  0% { opacity: 0; transform: translate(0, 0) scale(0.4); }
+  15% {
+    opacity: 1;
+    transform: translate(calc(var(--spark-x) * 0.15), calc(var(--spark-y) * 0.15)) scale(1);
+  }
+  65% {
+    opacity: 0.85;
+    transform: translate(calc(var(--spark-x) * 0.65), calc(var(--spark-y) * 0.65)) scale(0.85);
+  }
+  100% { opacity: 0; transform: translate(var(--spark-x), var(--spark-y)) scale(0.3); }
+}
+
+.playlist-batch-feedback .notice-dismiss {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+}
+
+.playlist-batch-feedback .notice-dismiss:hover {
+  background: rgb(127 127 127 / 12%);
+}
+
+.playlist-batch-feedback .notice-dismiss:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+.notice-dismiss svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notice-countdown-arc {
+    animation-name: notice-countdown-drain;
+    animation-timing-function: steps(10, end);
+    filter: none;
+  }
+
+  .notice-countdown-tip {
+    display: none;
+  }
+}
+
 .dialog-backdrop {
   position: fixed;
   z-index: 1000;

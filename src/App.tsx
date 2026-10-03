@@ -48,11 +48,7 @@ import {
   saveAutomaticUpdateChecksEnabled,
   updateStateFromResult,
 } from "./lib/updates";
-import {
-  closeYoutubeAuthBrowser,
-  hasAuthenticatedYoutubeCookies,
-  readYoutubeAuthCookies,
-} from "./lib/youtubeAuth";
+import { localizedYoutubeAuthError } from "./lib/youtubeAuth";
 import { getInitialBrowserAuthSettings, saveBrowserAuthSettings } from "./lib/browserAuth";
 
 type ThemeTransitionDocument = Document & {
@@ -142,6 +138,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     );
   });
   const youtubeAuthPollTimer = useRef<number | null>(null);
+  const youtubeAuthAttempt = useRef(0);
   const automaticUpdateCheckStarted = useRef(false);
   const notificationsEnabledRef = useRef(notificationsEnabled);
   const completionSoundEnabledRef = useRef(false);
@@ -291,6 +288,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     });
 
     return () => {
+      youtubeAuthAttempt.current += 1;
       if (youtubeAuthPollTimer.current !== null) {
         window.clearTimeout(youtubeAuthPollTimer.current);
       }
@@ -458,89 +456,86 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     });
   };
 
-  async function finishYoutubeAuthCapture(browser: string) {
-    setYoutubeAuthPhase("capturing");
-    setYoutubeAuthError(null);
-    let websocketUrl: string | null = null;
-    try {
-      const capture = await api.prepareYoutubeAuthCapture();
-      websocketUrl = capture.websocketUrl ?? null;
-      if (!websocketUrl) throw new Error(t("settings.youtubeAuthFailed"));
-      const cookies = await readYoutubeAuthCookies(websocketUrl);
-      if (!hasAuthenticatedYoutubeCookies(cookies)) {
-        await closeYoutubeAuthBrowser(websocketUrl);
-        const status = await api.cancelYoutubeAuth();
-        setYoutubeAuthStatus(status);
-        setYoutubeAuthPhase("error");
-        setYoutubeAuthError(t("settings.youtubeAuthCancelled"));
-        return;
-      }
-
-      await closeYoutubeAuthBrowser(websocketUrl);
-      const status = await api.completeYoutubeAuth(browser, cookies);
-      setYoutubeAuthStatus(status);
-      setYoutubeAuthBrowser(status.browser ?? browser);
-      setYoutubeAuthPhase("success");
-      setYoutubeAuthError(null);
-      setYoutubeSessionUsage(true);
-    } catch (error) {
-      if (websocketUrl) await closeYoutubeAuthBrowser(websocketUrl);
-      const status = await api.cancelYoutubeAuth().catch(() => null);
-      if (status) setYoutubeAuthStatus(status);
-      setYoutubeAuthPhase("error");
-      setYoutubeAuthError(String(error));
+  const stopYoutubeAuthPolling = () => {
+    youtubeAuthAttempt.current += 1;
+    if (youtubeAuthPollTimer.current !== null) {
+      window.clearTimeout(youtubeAuthPollTimer.current);
+      youtubeAuthPollTimer.current = null;
     }
-  }
+  };
 
   const scheduleYoutubeAuthPoll = (browser: string, startedAt: number) => {
+    const attempt = youtubeAuthAttempt.current;
+    let everAuthenticated = false;
+    let lastAuthenticated = false;
+    let consecutiveErrors = 0;
+    const isCurrent = () => youtubeAuthAttempt.current === attempt;
     const poll = async () => {
-      if (Date.now() - startedAt > 3 * 60_000) {
+      if (!isCurrent()) return;
+      try {
+        const state = await api.getYoutubeAuthWindowState();
+        if (!isCurrent()) return;
+        consecutiveErrors = 0;
+        setYoutubeAuthStatus(state.status);
+        setYoutubeAuthError(null);
+        if (state.sessionDetected) {
+          everAuthenticated = true;
+          setYoutubeAuthBrowser(state.status.browser ?? browser);
+          setYoutubeAuthPhase("success");
+          if (!lastAuthenticated) setYoutubeSessionUsage(true);
+        } else if (state.open) {
+          setYoutubeAuthPhase("waiting");
+          if (lastAuthenticated) setYoutubeSessionUsage(false);
+        }
+        lastAuthenticated = state.sessionDetected;
+        if (!state.open) {
+          youtubeAuthPollTimer.current = null;
+          if (everAuthenticated && state.status.authenticated) {
+            setYoutubeAuthPhase("success");
+          } else {
+            setYoutubeAuthPhase("error");
+            setYoutubeAuthError(t("settings.youtubeAuthCancelled"));
+          }
+          return;
+        }
+      } catch (error) {
+        if (!isCurrent()) return;
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= 3) {
+          setYoutubeAuthPhase("error");
+          setYoutubeAuthError(localizedYoutubeAuthError(String(error), t) ?? String(error));
+        }
+      }
+      if (!everAuthenticated && Date.now() - startedAt > 3 * 60_000) {
         youtubeAuthPollTimer.current = null;
         const status = await api.cancelYoutubeAuth().catch(() => null);
+        if (!isCurrent()) return;
         if (status) setYoutubeAuthStatus(status);
         setYoutubeAuthPhase("error");
         setYoutubeAuthError(t("settings.youtubeAuthTimeout"));
         return;
       }
-      try {
-        const windowState = await api.getYoutubeAuthWindowState();
-        if (windowState.sessionDetected) {
-          setYoutubeAuthPhase("finishing");
-          setYoutubeAuthError(null);
-        }
-        if (!windowState.open) {
-          youtubeAuthPollTimer.current = null;
-          await finishYoutubeAuthCapture(browser);
-          return;
-        }
-      } catch {
-        youtubeAuthPollTimer.current = null;
-        const status = await api.cancelYoutubeAuth().catch(() => null);
-        if (status) setYoutubeAuthStatus(status);
-        setYoutubeAuthPhase("error");
-        setYoutubeAuthError(t("settings.youtubeAuthCancelled"));
-        return;
-      }
-      youtubeAuthPollTimer.current = window.setTimeout(poll, 1_500);
+      if (isCurrent()) youtubeAuthPollTimer.current = window.setTimeout(poll, 500);
     };
     youtubeAuthPollTimer.current = window.setTimeout(poll, 500);
   };
 
   const startYoutubeLogin = async () => {
-    if (youtubeAuthPollTimer.current !== null) {
-      window.clearTimeout(youtubeAuthPollTimer.current);
-      youtubeAuthPollTimer.current = null;
-    }
+    stopYoutubeAuthPolling();
+    const attempt = youtubeAuthAttempt.current;
     setYoutubeAuthPhase("opening");
     setYoutubeAuthError(null);
     try {
       const session = await api.startYoutubeAuth(authSettings.browser);
+      if (youtubeAuthAttempt.current !== attempt) return;
       setYoutubeAuthBrowser(session.browser);
       setYoutubeAuthPhase("waiting");
       scheduleYoutubeAuthPoll(session.browser, Date.now());
     } catch (error) {
+      if (youtubeAuthAttempt.current !== attempt) return;
       setYoutubeAuthPhase("error");
-      setYoutubeAuthError(String(error));
+      const message = String(error);
+      setYoutubeAuthError(localizedYoutubeAuthError(message, t) ?? message);
     }
   };
 
@@ -594,10 +589,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   };
 
   const startYoutubeWebviewLogin = async () => {
-    if (youtubeAuthPollTimer.current !== null) {
-      window.clearTimeout(youtubeAuthPollTimer.current);
-      youtubeAuthPollTimer.current = null;
-    }
+    stopYoutubeAuthPolling();
     setYoutubeAuthPhase("opening");
     setYoutubeAuthError(null);
     try {
@@ -612,6 +604,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   };
 
   const signOutYoutube = async () => {
+    stopYoutubeAuthPolling();
     try {
       const status = await api.signOutYoutube();
       setYoutubeAuthStatus(status);
@@ -626,10 +619,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   };
 
   const clearYoutubeAuth = async () => {
-    if (youtubeAuthPollTimer.current !== null) {
-      window.clearTimeout(youtubeAuthPollTimer.current);
-      youtubeAuthPollTimer.current = null;
-    }
+    stopYoutubeAuthPolling();
     try {
       const status = await api.clearYoutubeAuth();
       setYoutubeAuthStatus(status);

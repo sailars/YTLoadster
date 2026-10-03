@@ -26,7 +26,9 @@ url = "2"
 percent-encoding = "2"
 semver = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["process", "rt-multi-thread", "macros", "io-util", "time"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
+tokio = { version = "1", features = ["process", "rt-multi-thread", "macros", "io-util", "time", "sync", "net"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
 

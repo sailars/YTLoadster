@@ -173,7 +173,7 @@ export function SettingsPanel({
     { value: "opera", label: "Opera" },
     ...(platform === "macos" ? [{ value: "safari", label: "Safari" }] : []),
   ];
-  const youtubeAuthBusy = ["opening", "waiting", "finishing", "capturing"].includes(
+  const youtubeAuthBusy = ["opening", "waiting"].includes(
     youtubeAuthPhase,
   );
   const normalizedCustomUserAgent = customUserAgentDraft.trim();
@@ -337,10 +337,6 @@ export function SettingsPanel({
                           : t("settings.youtubeAuthWaiting", {
                               browser: youtubeAuthBrowser ?? t("settings.youtubeAuthBrowser"),
                             })
-                        : youtubeAuthPhase === "finishing"
-                          ? t("settings.youtubeAuthFinishing")
-                        : youtubeAuthPhase === "capturing"
-                          ? t("settings.youtubeAuthCapturing")
                         : youtubeAuthPhase === "success"
                           ? t("settings.youtubeAuthSuccess")
                           : youtubeAuthPhase === "cleared"
@@ -788,7 +784,9 @@ export function SettingsPanel({
                           ? t("components.current", { version: component.currentVersion })
                           : t("components.missing")}</span>
                         <span>
-                          {component.state === "unavailable" ? t("components.unavailable")
+                          {component.state === "newerRelease" ? t("components.newerRelease", { latest: component.latestVersion ?? "" })
+                            : component.state === "notPublished" ? t("components.notPublished")
+                            : component.state === "unavailable" ? t("components.unavailable")
                             : component.state === "upToDate" ? t("components.upToDate")
                               : t("components.available", { latest: component.latestVersion ?? "" })}
                         </span>

@@ -3,10 +3,17 @@ import {
   isYouTubeAgeRestrictionError,
   isYouTubeBotConfirmationError,
   isYouTubeRateLimitError,
+  isYouTubeForbiddenError,
   sanitizeTechnicalError,
 } from "./errors";
 
 describe("technical error cleanup", () => {
+  it("recognizes raw and localized 403 errors without matching unrelated text", () => {
+    expect(isYouTubeForbiddenError("HTTP Error 403: Forbidden")).toBe(true);
+    expect(isYouTubeForbiddenError("403: Forbidden")).toBe(true);
+    expect(isYouTubeForbiddenError("YouTube временно отклонил запрос (ошибка 403).")).toBe(true);
+    expect(isYouTubeForbiddenError("Video 403 was not found")).toBe(false);
+  });
   it("recognizes a YouTube 429 rate limit", () => {
     expect(isYouTubeRateLimitError("HTTP Error 429: Too Many Requests")).toBe(true);
   });

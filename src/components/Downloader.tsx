@@ -1,10 +1,13 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "../lib/api";
+import { NoticeCountdown, noticeDurationMs } from "./NoticeCountdown";
+import { localizedYoutubeAuthError } from "../lib/youtubeAuth";
 import {
   isYouTubeAgeRestrictionError,
   isYouTubeBotConfirmationError,
   isYouTubeRateLimitError,
+  isYouTubeForbiddenError,
   sanitizeTechnicalError,
 } from "../lib/errors";
 import { localizeTechnicalText, useI18n, type AppLocale, type Translate } from "../lib/i18n";
@@ -83,10 +86,16 @@ export function Downloader({
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isEnqueueing, setIsEnqueueing] = useState(false);
   const [pendingHistoryDuplicate, setPendingHistoryDuplicate] = useState<DownloadRequest | null>(null);
-  const [enqueueResult, setEnqueueResult] = useState<DownloadMode | null>(null);
+  const [enqueueResult, setEnqueueResult] = useState<{ mode: DownloadMode; id: number } | null>(null);
+  const noticeSequence = useRef(0);
   const restoredRepeat = useRef<string | null>(null);
   const previousDefaultDestinationDir = useRef<string | null>(null);
   const analysisSequence = useRef(0);
+  useEffect(() => {
+    if (!enqueueResult) return;
+    const timeout = window.setTimeout(() => setEnqueueResult(null), noticeDurationMs);
+    return () => window.clearTimeout(timeout);
+  }, [enqueueResult]);
   const currentDuplicateSignature = mediaDuplicateSignature({
     mode,
     canonicalSource: media?.webpageUrl ?? analyzedUrl ?? url,
@@ -321,13 +330,14 @@ export function Downloader({
     try {
       const job = await api.enqueueDownload(request);
       onJobCreated(job);
-      setEnqueueResult(
-        request.preset === "subtitles"
+      setEnqueueResult({
+        id: ++noticeSequence.current,
+        mode: request.preset === "subtitles"
           ? "subtitles"
           : audioPresets.includes(request.preset)
             ? "audio"
             : "video",
-      );
+      });
       if (repeatDraft) onRepeatConsumed();
     } catch (err) {
       const duplicateKind = duplicateErrorKind(err);
@@ -578,10 +588,11 @@ export function Downloader({
         </div>
         {enqueueResult ? (
           <div className="inline-notice success-notice single-enqueue-result" role="status">
+            <NoticeCountdown key={enqueueResult.id} />
             <strong>
-              {enqueueResult === "audio"
+              {enqueueResult.mode === "audio"
                 ? t("downloader.enqueuedAudio")
-                : enqueueResult === "subtitles"
+                : enqueueResult.mode === "subtitles"
                   ? t("downloader.enqueuedSubtitles")
                   : t("downloader.enqueuedVideo")}
             </strong>
@@ -771,6 +782,8 @@ function readableError(error: unknown, browser: string | undefined, locale: AppL
   if (normalized.includes("analysis-error:timeout")) {
     return t("error.analysisTimeout");
   }
+  const authError = localizedYoutubeAuthError(message, t);
+  if (authError) return authError;
   if (isYouTubeAgeRestrictionError(message)) {
     return t("error.ageRestricted");
   }
@@ -779,6 +792,9 @@ function readableError(error: unknown, browser: string | undefined, locale: AppL
   }
   if (isYouTubeRateLimitError(message)) {
     return t("error.rateLimited");
+  }
+  if (isYouTubeForbiddenError(message)) {
+    return t("error.forbidden");
   }
   if (normalized.includes("could not copy chrome cookie database")) {
     const baseMessage = t("error.cookiesLocked");

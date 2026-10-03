@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "../lib/api";
+import { NoticeCountdown, noticeDurationMs } from "./NoticeCountdown";
+import { localizedYoutubeAuthError } from "../lib/youtubeAuth";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import {
   aggregatePlaylistFormats,
@@ -114,7 +116,13 @@ export function Playlist({
     formatSelectionMode,
   });
   const [enqueueing, setEnqueueing] = useState(false);
-  const [enqueueResult, setEnqueueResult] = useState<{ added: number; skipped: number } | null>(null);
+  const [enqueueResult, setEnqueueResult] = useState<{ added: number; skipped: number; id: number } | null>(null);
+  const noticeSequence = useRef(0);
+  useEffect(() => {
+    if (!enqueueResult || enqueueResult.added === 0) return;
+    const timeout = window.setTimeout(() => setEnqueueResult(null), noticeDurationMs);
+    return () => window.clearTimeout(timeout);
+  }, [enqueueResult]);
   const [duplicateDraft, setDuplicateDraft] = useState<{ draft: BatchDraft; duplicates: HistoryDuplicate[] } | null>(null);
   const [warningDraft, setWarningDraft] = useState<BatchDraft | null>(null);
 
@@ -283,7 +291,8 @@ export function Playlist({
         }
       } catch (error) {
         if (generation === generationRef.current) {
-          setPlaylistError(isAnalysisTimeout(error) ? t("error.analysisTimeout") : t("playlist.loadError"));
+          setPlaylistError(localizedYoutubeAuthError(String(error), t)
+            ?? (isAnalysisTimeout(error) ? t("error.analysisTimeout") : t("playlist.loadError")));
         }
       } finally {
         if (generation === generationRef.current) setLoadingPlaylist(false);
@@ -578,7 +587,7 @@ export function Playlist({
       warningCount: warnings,
     };
     if (!candidates.length) {
-      setEnqueueResult({ added: 0, skipped: selectedRows.length });
+      setEnqueueResult({ added: 0, skipped: selectedRows.length, id: ++noticeSequence.current });
       return;
     }
     setEnqueueing(true);
@@ -623,7 +632,7 @@ export function Playlist({
   async function executeBatch(draft: BatchDraft) {
     setWarningDraft(null);
     if (!draft.items.length) {
-      setEnqueueResult({ added: 0, skipped: draft.baselineSkipped });
+      setEnqueueResult({ added: 0, skipped: draft.baselineSkipped, id: ++noticeSequence.current });
       return;
     }
     setEnqueueing(true);
@@ -642,11 +651,12 @@ export function Playlist({
       }));
       onJobsCreated(result.queued.map((item) => item.job));
       setEnqueueResult({
+        id: ++noticeSequence.current,
         added: result.queued.length,
         skipped: draft.baselineSkipped + result.rejected.length,
       });
     } catch {
-      setEnqueueResult({ added: 0, skipped: draft.baselineSkipped + draft.items.length });
+      setEnqueueResult({ added: 0, skipped: draft.baselineSkipped + draft.items.length, id: ++noticeSequence.current });
     } finally {
       setEnqueueing(false);
     }
@@ -669,6 +679,7 @@ export function Playlist({
       onDestination={chooseDestination}
       onEnqueue={() => void prepareBatch()}
       onOpenQueue={onOpenQueue}
+      onDismissResult={() => setEnqueueResult(null)}
     />
   );
 
@@ -1124,6 +1135,7 @@ function PlaylistParametersPanel({
   onDestination,
   onEnqueue,
   onOpenQueue,
+  onDismissResult,
 }: {
   params: PlaylistParameters;
   setParams: React.Dispatch<React.SetStateAction<PlaylistParameters>>;
@@ -1135,11 +1147,12 @@ function PlaylistParametersPanel({
   readyForBatch: boolean;
   selectedAnalysisPending: boolean;
   enqueueing: boolean;
-  enqueueResult: { added: number; skipped: number } | null;
+  enqueueResult: { added: number; skipped: number; id: number } | null;
   onModeChange: (mode: PlaylistDownloadMode) => void;
   onDestination: () => void;
   onEnqueue: () => void;
   onOpenQueue: () => void;
+  onDismissResult: () => void;
 }) {
   const { locale, t } = useI18n();
   const [videoAdvancedOpen, setVideoAdvancedOpen] = useState(false);
@@ -1277,8 +1290,20 @@ function PlaylistParametersPanel({
         {selectedAnalysisPending ? <small className="playlist-readiness-note">{t("playlist.waitSelectedAnalysis")}</small> : null}
         {enqueueResult ? (
           <div className={`playlist-batch-feedback${enqueueResult.skipped > 0 ? " has-skips" : " all-added"}`} role={enqueueResult.skipped > 0 ? "alert" : "status"}>
+            {enqueueResult.added > 0 ? <NoticeCountdown key={enqueueResult.id} /> : null}
             <div><strong>{enqueueResult.skipped > 0 ? t("playlist.batchPartialTitle") : t("playlist.batchResultTitle")}</strong><span>{t("playlist.batchResult", enqueueResult)}</span></div>
             <button type="button" className="secondary" onClick={onOpenQueue}>{t("playlist.openQueue")}</button>
+            <button
+              type="button"
+              className="notice-dismiss"
+              onClick={onDismissResult}
+              aria-label={t("playlist.dismissBatchResult")}
+              title={t("playlist.dismissBatchResult")}
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path d="M4 4l8 8M12 4l-8 8" />
+              </svg>
+            </button>
           </div>
         ) : null}
       </section>
@@ -1359,6 +1384,8 @@ function rowDetail(row: PlaylistRow, resolved: ResolvedPlaylistItem | null | und
   if (job?.error) return detailText(t("playlist.downloadErrorDetail"));
   if (!job && row.rejection) return detailText(duplicateRejectionLabel(row.rejection, t));
   if (row.issue) {
+    const authError = localizedYoutubeAuthError(row.issue.message, t);
+    if (authError) return detailText(authError);
     if (isAnalysisTimeout(row.issue.message)) return detailText(t("error.analysisTimeout"));
     return detailText(t(`playlist.issue.${row.issue.code}` as TranslationKey));
   }

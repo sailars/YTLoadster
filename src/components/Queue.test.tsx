@@ -40,6 +40,11 @@ function renderQueue(jobs: Job[]) {
 }
 
 describe("Queue status layout", () => {
+  it("explains why a queued download cannot refresh its live YouTube session", () => {
+    renderQueue([{ ...job(1, "Failed", "Account video"), error: "youtube-auth-refresh-failed" }]);
+    expect(screen.getByText(/не удалось обновить сессию YouTube/i)).toBeInTheDocument();
+    expect(screen.queryByText("youtube-auth-refresh-failed")).not.toBeInTheDocument();
+  });
   it("groups visible jobs, exposes filters and omits completed rows", async () => {
     renderQueue([
       job(1, "Running", "Running title"),

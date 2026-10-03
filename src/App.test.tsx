@@ -11,7 +11,6 @@ import { localeStorageKey } from "./lib/i18n";
 import { notificationsStorageKey } from "./lib/notifications";
 import { automaticUpdateChecksStorageKey } from "./lib/updates";
 import type { Job } from "./lib/types";
-import * as youtubeAuth from "./lib/youtubeAuth";
 import "./styles.css";
 
 vi.mock("./lib/api", () => ({
@@ -50,11 +49,9 @@ vi.mock("./lib/api", () => ({
     }),
     startYoutubeAuth: vi.fn().mockResolvedValue({
       browser: "Microsoft Edge",
-      websocketUrl: null,
     }),
     startYoutubeWebviewAuth: vi.fn().mockResolvedValue({
       browser: "WebView2",
-      websocketUrl: null,
     }),
     getYoutubeWebviewAuthState: vi.fn().mockResolvedValue({
       open: true,
@@ -73,15 +70,7 @@ vi.mock("./lib/api", () => ({
     getYoutubeAuthWindowState: vi.fn().mockResolvedValue({
       open: true,
       sessionDetected: false,
-    }),
-    prepareYoutubeAuthCapture: vi.fn().mockResolvedValue({
-      browser: "Microsoft Edge",
-      websocketUrl: "ws://127.0.0.1:9222/devtools/browser/test",
-    }),
-    completeYoutubeAuth: vi.fn().mockResolvedValue({
-      supported: true,
-      authenticated: true,
-      browser: "Microsoft Edge",
+      status: { supported: true, authenticated: false, browser: null },
     }),
     signOutYoutube: vi.fn().mockResolvedValue({
       supported: true,
@@ -225,6 +214,10 @@ describe("App", () => {
     vi.mocked(writeText).mockResolvedValue(undefined);
     vi.mocked(isPermissionGranted).mockResolvedValue(true);
     vi.mocked(requestPermission).mockResolvedValue("granted");
+    vi.mocked(api.getYoutubeAuthWindowState).mockResolvedValue({
+      open: true, sessionDetected: false,
+      status: { supported: true, authenticated: false, browser: null },
+    });
     vi.mocked(api.checkForUpdates).mockResolvedValue({
       currentVersion: "0.1.0",
       latestVersion: "0.1.0",
@@ -1584,7 +1577,7 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=x");
 
-    expect(await screen.findByText("Не удалось расшифровать cookies выбранного Chromium-браузера через защиту Windows (DPAPI). Некоторые Chromium-браузеры дополнительно защищают cookies, и программа не может их прочитать. Это не ошибка загрузчика: используйте Firefox/LibreWolf для входа или отключите вход через браузер")).toBeInTheDocument();
+    expect(await screen.findByText("Не удалось расшифровать cookies выбранного Chromium-браузера через защиту Windows (DPAPI). Некоторые Chromium-браузеры дополнительно защищают cookies, и программа не может их прочитать. Это не ошибка YTLoadster. Используйте Firefox/LibreWolf для авторизации или используйте \"Войти в YouTube\".")).toBeInTheDocument();
     expect(screen.queryByText(/Failed to decrypt with DPAPI/i)).not.toBeInTheDocument();
   });
 
@@ -1664,7 +1657,7 @@ describe("App", () => {
 
     expect(
       await screen.findByText(
-        "Для этого видео YouTube требует войти в аккаунт и подтвердить возраст. Откройте Настройки → Вход в YouTube, выполните вход и повторите попытку. Если вход уже выполнен, убедитесь, что возраст подтверждён в аккаунте.",
+        "Для этого видео YouTube требует войти в аккаунт и подтвердить возраст. Откройте Настройки → Авторизация → Войти в YouTube, выполните вход и повторите попытку. Если вход уже выполнен, убедитесь, что возраст подтверждён в аккаунте.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/cookies-from-browser|github\.com|yt-dlp/i)).not.toBeInTheDocument();
@@ -1678,7 +1671,7 @@ describe("App", () => {
 
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=pe9e-3BME64");
 
-    expect(await screen.findByText("YouTube просит подтвердить, что вы не робот. Войдите в аккаунт YouTube/авторизуйтесь через браузер в настройках приложения и повторите попытку.")).toBeInTheDocument();
+    expect(await screen.findByText("YouTube просит подтвердить, что вы не робот. Откройте Настройки → Авторизация → Войти в YouTube, выполните вход и повторите попытку.")).toBeInTheDocument();
     expect(screen.queryByText(/cookies-from-browser|github\.com|yt-dlp/i)).not.toBeInTheDocument();
   });
 
@@ -1838,7 +1831,7 @@ describe("App", () => {
     const warning = screen.getByRole("alertdialog", { name: /перед входом в YouTube/i });
     expect(within(warning).getByText(/выберите нужный аккаунт, если их несколько/i)).toBeInTheDocument();
     expect(within(warning).getByText(/дождитесь.+откроется YouTube/i)).toBeInTheDocument();
-    expect(within(warning).getByText(/вручную закройте только это отдельное окно/i)).toBeInTheDocument();
+    expect(within(warning).getByText(/сессия сохранится автоматически.+окно можно оставить открытым/i)).toBeInTheDocument();
     expect(api.startYoutubeAuth).not.toHaveBeenCalled();
 
     await userEvent.click(within(warning).getByRole("button", { name: /понятно, продолжить/i }));
@@ -1863,7 +1856,7 @@ describe("App", () => {
     const warning = screen.getByRole("alertdialog", { name: /before signing in to YouTube/i });
     expect(within(warning).getByText(/select the account.+if more than one is available/i)).toBeInTheDocument();
     expect(within(warning).getByText(/wait until YouTube opens/i)).toBeInTheDocument();
-    expect(within(warning).getByText(/manually close only that separate browser window/i)).toBeInTheDocument();
+    expect(within(warning).getByText(/session will be saved automatically.+leave the window open/i)).toBeInTheDocument();
     await userEvent.click(within(warning).getByRole("button", { name: "Continue" }));
 
     expect(api.startYoutubeAuth).toHaveBeenCalledWith("chrome");
@@ -1911,14 +1904,13 @@ describe("App", () => {
     expect(api.getYoutubeWebviewAuthState).toHaveBeenCalled();
   });
 
-  it("reenables YouTube sign-in when the authentication browser is closed", async () => {
+  it.each(["windows", "macos"])("reenables YouTube sign-in when the %s browser closes before authentication", async (platform) => {
+    vi.mocked(api.getAppStatus).mockResolvedValueOnce({ name: "YTLoadster", ready: true, platform });
     vi.mocked(api.getYoutubeAuthWindowState).mockResolvedValueOnce({
-      open: false,
-      sessionDetected: false,
+      open: false, sessionDetected: false,
+      status: { supported: true, authenticated: false, browser: null },
     });
-    vi.spyOn(youtubeAuth, "readYoutubeAuthCookies").mockResolvedValueOnce([]);
     render(<App />);
-
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
     await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
@@ -1927,40 +1919,149 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
 
     expect(await screen.findByText(/окно браузера закрыто.+можно повторить/i)).toBeInTheDocument();
-    expect(api.cancelYoutubeAuth).toHaveBeenCalledTimes(1);
     expect(loginButton).toBeEnabled();
+    expect(window.localStorage.getItem("ytloadster.browserAuth") ?? "").not.toContain('"useYoutubeSession":true');
   });
 
-  it("shows that the account was detected and completes YouTube sign-in", async () => {
-    vi.mocked(api.getYoutubeAuthWindowState)
-      .mockResolvedValueOnce({ open: true, sessionDetected: true })
-      .mockResolvedValueOnce({ open: false, sessionDetected: true });
-    vi.spyOn(youtubeAuth, "readYoutubeAuthCookies").mockResolvedValueOnce([
-      {
-        name: "SAPISID",
-        value: "session",
-        domain: ".youtube.com",
-        path: "/",
-        expires: 1_900_000_000,
-        secure: true,
-      },
-    ]);
-    vi.spyOn(youtubeAuth, "closeYoutubeAuthBrowser").mockResolvedValue();
+  it.each([
+    { platform: "windows", locale: "ru", theme: "light" },
+    { platform: "macos", locale: "en", theme: "dark" },
+  ])("activates the saved $platform YouTube session in $locale while the browser stays open", async ({ platform, locale, theme }) => {
+    window.localStorage.setItem(localeStorageKey, locale);
+    window.localStorage.setItem(themeStorageKey, theme);
+    vi.mocked(api.getAppStatus).mockResolvedValueOnce({ name: "YTLoadster", ready: true, platform });
+    const status = { supported: true, authenticated: true, browser: "Google Chrome" };
+    vi.mocked(api.startYoutubeAuth).mockResolvedValueOnce({ browser: "Google Chrome" });
+    vi.mocked(api.getYoutubeAuthWindowState).mockResolvedValue({ open: true, sessionDetected: true, status });
     render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /settings|настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /authorization|авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /sign in to YouTube|войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    const dialog = screen.getByRole("alertdialog");
+    expect(within(dialog).getByText(/leave the window open|окно можно оставить открытым/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Continue|понятно, продолжить/i }));
 
+    expect(await screen.findByText(/signed in through Google Chrome|вход выполнен через Google Chrome/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign out of YouTube|выйти из YouTube/i })).toBeEnabled();
+    expect(window.localStorage.getItem("ytloadster.browserAuth")).toContain('"useYoutubeSession":true');
+    expect(api.cancelYoutubeAuth).not.toHaveBeenCalled();
+    expect(document.documentElement).toHaveAttribute("data-theme", theme);
+    // The next probe can use the session before any closed-window response.
+    await userEvent.click(screen.getByRole("button", { name: /new download|новая загрузка/i }));
+    fireEvent.change(screen.getByPlaceholderText(/youtube\.com/i), { target: { value: "https://youtube.com/watch?v=authenticated" } });
+    await waitFor(() => expect(api.probeUrl).toHaveBeenCalledWith(
+      "https://youtube.com/watch?v=authenticated", { kind: "youtubeSession" }, expect.any(String),
+    ));
+  });
+
+  it("ignores late YouTube startup after the app is unmounted", async () => {
+    let finishStart!: (value: { browser: string }) => void;
+    vi.mocked(api.startYoutubeAuth).mockImplementationOnce(() => new Promise((resolve) => { finishStart = resolve; }));
+    const { unmount } = render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
     await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
     await waitFor(() => expect(loginButton).toBeEnabled());
     await userEvent.click(loginButton);
     await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
+    expect(api.startYoutubeAuth).toHaveBeenCalledTimes(1);
+    unmount();
+    vi.useFakeTimers();
+    await act(async () => finishStart({ browser: "Microsoft Edge" }));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(api.getYoutubeAuthWindowState).not.toHaveBeenCalled();
+  });
 
-    expect(await screen.findByText(/аккаунт обнаружен.+закройте отдельное окно/i)).toBeInTheDocument();
-    expect(await screen.findByText(/вход выполнен через Microsoft Edge/i, {}, { timeout: 4_000 })).toBeInTheDocument();
-    expect(api.completeYoutubeAuth).toHaveBeenCalledTimes(1);
-    expect(
-      vi.mocked(youtubeAuth.closeYoutubeAuthBrowser).mock.invocationCallOrder[0],
-    ).toBeLessThan(vi.mocked(api.completeYoutubeAuth).mock.invocationCallOrder[0]);
+  it("keeps the saved YouTube session after the separate browser closes", async () => {
+    const status = { supported: true, authenticated: true, browser: "Microsoft Edge" };
+    vi.mocked(api.getYoutubeAuthWindowState)
+      .mockResolvedValueOnce({ open: true, sessionDetected: true, status })
+      .mockResolvedValueOnce({ open: false, sessionDetected: true, status });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
+    expect(await screen.findByText(/вход выполнен через Microsoft Edge/i)).toBeInTheDocument();
+    await waitFor(() => expect(api.getYoutubeAuthWindowState).toHaveBeenCalledTimes(2));
+    expect(screen.getByText(/вход выполнен через Microsoft Edge/i)).toBeInTheDocument();
+    expect(window.localStorage.getItem("ytloadster.browserAuth")).toContain('"useYoutubeSession":true');
+  });
+
+  it("activates a session saved in the background before the first window-state poll", async () => {
+    vi.mocked(api.getYoutubeAuthWindowState).mockResolvedValueOnce({
+      open: false, sessionDetected: true,
+      status: { supported: true, authenticated: true, browser: "Microsoft Edge" },
+    });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
+    expect(await screen.findByText(/вход выполнен через Microsoft Edge/i)).toBeInTheDocument();
+    expect(window.localStorage.getItem("ytloadster.browserAuth")).toContain('"useYoutubeSession":true');
+  });
+
+  it("disables saved-session usage when the user logs out in the open browser", async () => {
+    vi.mocked(api.getYoutubeAuthWindowState)
+      .mockResolvedValueOnce({ open: true, sessionDetected: true,
+        status: { supported: true, authenticated: true, browser: "Microsoft Edge" } })
+      .mockResolvedValueOnce({ open: true, sessionDetected: false,
+        status: { supported: true, authenticated: false, browser: null } });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
+    expect(await screen.findByText(/вход выполнен через Microsoft Edge/i)).toBeInTheDocument();
+    await waitFor(() => expect(window.localStorage.getItem("ytloadster.browserAuth")).toContain('"useYoutubeSession":false'));
+    expect(screen.getByText(/сессия сохранится автоматически/i)).toBeInTheDocument();
+  });
+
+  it("ignores an in-flight cookie poll after signing out of YTLoadster", async () => {
+    const status = { supported: true, authenticated: true, browser: "Microsoft Edge" };
+    let finishPoll!: (value: { open: boolean; sessionDetected: boolean; status: typeof status }) => void;
+    vi.mocked(api.getYoutubeAuthWindowState)
+      .mockResolvedValueOnce({ open: true, sessionDetected: true, status })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishPoll = resolve; }));
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
+    expect(await screen.findByText(/вход выполнен через Microsoft Edge/i)).toBeInTheDocument();
+    await waitFor(() => expect(finishPoll).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: /выйти из YouTube/i }));
+    await waitFor(() => expect(api.signOutYoutube).toHaveBeenCalledTimes(1));
+    await act(async () => finishPoll({ open: true, sessionDetected: true, status }));
+    expect(screen.queryByText(/вход выполнен через Microsoft Edge/i)).not.toBeInTheDocument();
+    expect(window.localStorage.getItem("ytloadster.browserAuth")).toContain('"useYoutubeSession":false');
+  });
+  it.each([
+    { locale: "ru", message: "Не удалось завершить вход в YouTube." },
+    { locale: "en", message: "Could not complete YouTube sign-in." },
+  ])("localizes a macOS browser connection failure in $locale", async ({ locale, message }) => {
+    window.localStorage.setItem(localeStorageKey, locale);
+    vi.mocked(api.startYoutubeAuth).mockRejectedValueOnce("youtube-auth-connection-failed");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /settings|настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /authorization|авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /sign in to YouTube|войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    await userEvent.click(screen.getByRole("button", { name: /Continue|понятно, продолжить/i }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByText("youtube-auth-connection-failed")).not.toBeInTheDocument();
   });
 
   it("clears saved YouTube sign-in data even when no session is active", async () => {
@@ -2058,6 +2159,46 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: "Проверить обновления" }));
     await waitFor(() => expect(api.checkForUpdates).toHaveBeenCalledTimes(2));
     expect(await screen.findByText("Установлена актуальная версия.")).toBeInTheDocument();
+  });
+
+  it.each([
+    { locale: "ru", neutral: "Отдельные обновления пока не опубликованы.", failure: "Сведения об обновлении недоступны." },
+    { locale: "en", neutral: "Separate updates have not been published yet.", failure: "Update information is unavailable." },
+  ])("distinguishes unpublished component updates from check failures in $locale", async ({ locale, neutral, failure }) => {
+    window.localStorage.setItem(localeStorageKey, locale);
+    vi.mocked(api.checkComponentUpdates).mockResolvedValueOnce([
+      { id: "ffmpeg", currentVersion: "8.1.2", latestVersion: null, state: "notPublished", sourceUrl: null },
+      { id: "ytdlp", currentVersion: "2026.08.19", latestVersion: null, state: "unavailable", sourceUrl: null },
+    ]);
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки|settings/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /о программе|about/i }));
+    await userEvent.click(screen.getByRole("button", { name: /проверить обновления компонентов|check component updates/i }));
+    const message = await screen.findByText(neutral);
+    expect(screen.getByText(failure)).toBeInTheDocument();
+    const row = message.closest("li")!;
+    expect(within(row).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(row).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { locale: "ru", current: "У вас установлена последняя версия.", newer: "Выпущена версия 9.0.2. Обновление через приложение пока недоступно." },
+    { locale: "en", current: "You have the latest version installed.", newer: "Version 9.0.2 has been released. In-app update is not available yet." },
+  ])("shows verified FFmpeg versions without an installable package in $locale", async ({ locale, current, newer }) => {
+    window.localStorage.setItem(localeStorageKey, locale);
+    vi.mocked(api.checkComponentUpdates)
+      .mockResolvedValueOnce([{ id: "ffmpeg", currentVersion: "9.0.2", latestVersion: "9.0.2", state: "upToDate", sourceUrl: "https://ffmpeg.org/download.html" }])
+      .mockResolvedValueOnce([{ id: "ffmpeg", currentVersion: "8.1.2", latestVersion: "9.0.2", state: "newerRelease", sourceUrl: "https://ffmpeg.org/download.html" }]);
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки|settings/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /о программе|about/i }));
+    const check = screen.getByRole("button", { name: /проверить обновления компонентов|check component updates/i });
+    await userEvent.click(check);
+    expect(await screen.findByText(current)).toBeInTheDocument();
+    await userEvent.click(check);
+    const message = await screen.findByText(newer);
+    expect(screen.queryByText(current)).not.toBeInTheDocument();
+    expect(within(message.closest("li")!).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("shows the new Deno version after a component update", async () => {
@@ -3089,6 +3230,29 @@ describe("App", () => {
     expect(await screen.findByText("Retry Video")).toBeInTheDocument();
     expect(screen.queryByText("Failed Video")).not.toBeInTheDocument();
     expect(screen.getByText("Cancelled Video")).toBeInTheDocument();
+  });
+
+  it("hides the enqueue notice ten seconds after the latest successful download", async () => {
+    render(<App />);
+    await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=notice");
+    const downloadButton = await screen.findByRole("button", { name: /скачать/i });
+    await waitFor(() => expect(downloadButton).toBeEnabled());
+    vi.useFakeTimers();
+    await act(async () => { fireEvent.click(downloadButton); });
+    expect(screen.getByText("Видео добавлено в очередь")).toBeInTheDocument();
+    const countdown = document.querySelector(".single-enqueue-result svg");
+    expect(countdown).toHaveAttribute("aria-hidden", "true");
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    await act(async () => { fireEvent.click(downloadButton); });
+    expect(api.enqueueDownload).toHaveBeenCalledTimes(2);
+    expect(document.querySelector(".single-enqueue-result svg")).not.toBe(countdown);
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(screen.getByText("Видео добавлено в очередь")).toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(4_999));
+    expect(screen.getByText("Видео добавлено в очередь")).toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(screen.queryByText("Видео добавлено в очередь")).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/ссылка на видео/i)).toHaveValue("https://youtube.com/watch?v=notice");
   });
 
   it("allows adding another download while the previous one stays in the queue", async () => {

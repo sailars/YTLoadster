@@ -18,6 +18,7 @@ const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOOL_BYTES: u64 = 180 * 1024 * 1024;
 const MAX_FFMPEG_BYTES: u64 = 700 * 1024 * 1024;
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(45);
+const FFMPEG_RELEASES_URL: &str = "https://ffmpeg.org/download.html";
 
 #[derive(Default)]
 pub struct ComponentUpdateLock(AtomicBool);
@@ -107,7 +108,15 @@ pub async fn check_component_updates(app: AppHandle) -> Vec<ComponentUpdateStatu
             None => None,
         };
         let status = match latest_source(&client, id).await {
-            Ok(source) => status_for_source(id, current, &source),
+            Ok(Some(source)) => status_for_source(id, current, &source),
+            Ok(None) if id == ComponentId::Ffmpeg => match official_ffmpeg_version(&client).await {
+                Ok(latest) => status_for_official_ffmpeg(current, latest),
+                Err(_) => unavailable(id, current),
+            },
+            Ok(None) => ComponentUpdateStatus {
+                state: "notPublished",
+                ..unavailable(id, current)
+            },
             Err(_) => unavailable(id, current),
         };
         results.push(status);
@@ -126,7 +135,7 @@ pub async fn install_component_update(
         .map_err(|_| "другое обновление компонента ещё выполняется".to_string())?;
     let _guard = InstallationGuard(&lock.0);
     let client = http_client(&app)?;
-    let source = latest_source(&client, id).await?;
+    let source = latest_source(&client, id).await?.ok_or_else(check_error)?;
     let env = ToolEnvironment::current_for_app(&app);
     #[cfg(target_os = "windows")]
     let root = env.app_tools_dir.clone();
@@ -292,6 +301,54 @@ fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+fn status_for_official_ffmpeg(
+    current_version: Option<String>,
+    latest_version: String,
+) -> ComponentUpdateStatus {
+    let Some(current) = current_version.as_deref().and_then(version_numbers) else {
+        return unavailable(ComponentId::Ffmpeg, current_version);
+    };
+    let Some(latest) = version_numbers(&latest_version) else {
+        return unavailable(ComponentId::Ffmpeg, current_version);
+    };
+    ComponentUpdateStatus {
+        id: ComponentId::Ffmpeg,
+        current_version,
+        latest_version: Some(latest_version),
+        state: if current >= latest {
+            "upToDate"
+        } else {
+            "newerRelease"
+        },
+        source_url: Some(FFMPEG_RELEASES_URL.to_string()),
+    }
+}
+
+async fn official_ffmpeg_version(client: &reqwest::Client) -> Result<String, String> {
+    let response = client
+        .get(FFMPEG_RELEASES_URL)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|_| check_error())?;
+    let bytes = bounded_metadata(response).await?;
+    let html = std::str::from_utf8(&bytes).map_err(|_| check_error())?;
+    select_official_ffmpeg_version(html).ok_or_else(check_error)
+}
+
+fn select_official_ffmpeg_version(html: &str) -> Option<String> {
+    html.split("ffmpeg-")
+        .filter_map(|tail| {
+            let (version, _) = tail.split_once(".tar.xz")?;
+            if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                return None;
+            }
+            Some((version_numbers(version)?, version.to_string()))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, version)| version)
+}
+
 fn http_client(app: &AppHandle) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .https_only(true)
@@ -302,7 +359,10 @@ fn http_client(app: &AppHandle) -> Result<reqwest::Client, String> {
         .map_err(|_| check_error())
 }
 
-async fn latest_source(client: &reqwest::Client, id: ComponentId) -> Result<Source, String> {
+async fn latest_source(
+    client: &reqwest::Client,
+    id: ComponentId,
+) -> Result<Option<Source>, String> {
     match id {
         ComponentId::Ytdlp => {
             let repo = "yt-dlp/yt-dlp";
@@ -317,7 +377,7 @@ async fn latest_source(client: &reqwest::Client, id: ComponentId) -> Result<Sour
                 "yt-dlp_macos"
             };
             let version = release.tag_name.clone();
-            source_for_asset(release, repo, version, name)
+            source_for_asset(release, repo, version, name).map(Some)
         }
         ComponentId::Deno => {
             let repo = "denoland/deno";
@@ -333,7 +393,7 @@ async fn latest_source(client: &reqwest::Client, id: ComponentId) -> Result<Sour
                 _ => return Err(check_error()),
             };
             let version = release.tag_name.trim_start_matches('v').to_string();
-            source_for_asset(release, repo, version, target)
+            source_for_asset(release, repo, version, target).map(Some)
         }
         ComponentId::Ffmpeg if cfg!(target_os = "windows") => {
             let repo = "BtbN/FFmpeg-Builds";
@@ -343,7 +403,7 @@ async fn latest_source(client: &reqwest::Client, id: ComponentId) -> Result<Sour
             )
             .await?;
             let (version, name) = select_windows_ffmpeg_asset(&release).ok_or_else(check_error)?;
-            source_for_asset(release, repo, version, &name)
+            source_for_asset(release, repo, version, &name).map(Some)
         }
         ComponentId::Ffmpeg if cfg!(target_os = "macos") => {
             let repo = "sailars/YTLoadster";
@@ -357,27 +417,32 @@ async fn latest_source(client: &reqwest::Client, id: ComponentId) -> Result<Sour
                 "x86_64" => "ffmpeg-macos-x64.tar.gz",
                 _ => return Err(check_error()),
             };
-            let release = releases
-                .into_iter()
-                .filter(|release| !release.draft && !release.prerelease)
-                .filter(|release| release.tag_name.starts_with("ffmpeg-components-"))
-                .filter(|release| release.assets.iter().any(|asset| asset.name == name))
-                .filter(|release| {
-                    version_numbers(release.tag_name.trim_start_matches("ffmpeg-components-"))
-                        .is_some()
-                })
-                .max_by_key(|release| {
-                    version_numbers(release.tag_name.trim_start_matches("ffmpeg-components-"))
-                });
-            let release = release.ok_or_else(check_error)?;
+            let release = select_macos_ffmpeg_release(releases, name);
+            let Some(release) = release else {
+                return Ok(None);
+            };
             let version = release
                 .tag_name
                 .trim_start_matches("ffmpeg-components-")
                 .to_string();
-            source_for_asset(release, repo, version, name)
+            source_for_asset(release, repo, version, name).map(Some)
         }
         _ => Err(check_error()),
     }
+}
+
+fn select_macos_ffmpeg_release(releases: Vec<GitHubRelease>, name: &str) -> Option<GitHubRelease> {
+    releases
+        .into_iter()
+        .filter(|release| !release.draft && !release.prerelease)
+        .filter(|release| release.tag_name.starts_with("ffmpeg-components-"))
+        .filter(|release| release.assets.iter().any(|asset| asset.name == name))
+        .filter(|release| {
+            version_numbers(release.tag_name.trim_start_matches("ffmpeg-components-")).is_some()
+        })
+        .max_by_key(|release| {
+            version_numbers(release.tag_name.trim_start_matches("ffmpeg-components-"))
+        })
 }
 
 fn select_windows_ffmpeg_asset(release: &GitHubRelease) -> Option<(String, String)> {
@@ -451,13 +516,18 @@ async fn github_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
 ) -> Result<T, String> {
-    let mut response = client
+    let response = client
         .get(url)
         .header(ACCEPT, "application/vnd.github+json")
         .header(CACHE_CONTROL, "no-cache")
         .send()
         .await
         .map_err(|_| check_error())?;
+    let data = bounded_metadata(response).await?;
+    serde_json::from_slice(&data).map_err(|_| check_error())
+}
+
+async fn bounded_metadata(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
     if !response.status().is_success()
         || response
             .content_length()
@@ -472,7 +542,7 @@ async fn github_json<T: serde::de::DeserializeOwned>(
         }
         data.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&data).map_err(|_| check_error())
+    Ok(data)
 }
 
 async fn download_verified(
@@ -875,6 +945,52 @@ fn install_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checks_official_ffmpeg_releases_without_an_installable_package() {
+        let html = r#"<a href="releases/ffmpeg-8.1.3.tar.xz">Older branch</a>
+            <a href="releases/ffmpeg-9.0.2.tar.xz">Latest</a>
+            <a href="ffmpeg-release-latest.tar.xz">Alias</a>
+            <a href="ffmpeg-10.0-rc1.tar.xz">Preview</a>"#;
+        assert_eq!(
+            select_official_ffmpeg_version(html).as_deref(),
+            Some("9.0.2")
+        );
+        assert_eq!(select_official_ffmpeg_version("No release metadata"), None);
+        let latest = status_for_official_ffmpeg(Some("9.0.2".into()), "9.0.2".into());
+        assert_eq!(latest.state, "upToDate");
+        let older = status_for_official_ffmpeg(Some("8.1.2".into()), "9.0.2".into());
+        assert_eq!(older.state, "newerRelease");
+        assert_eq!(older.latest_version.as_deref(), Some("9.0.2"));
+        assert_eq!(
+            status_for_official_ffmpeg(None, "9.0.2".into()).state,
+            "unavailable"
+        );
+        assert_eq!(
+            status_for_official_ffmpeg(Some("unknown".into()), "9.0.2".into()).state,
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn distinguishes_unpublished_macos_packages_from_matching_releases() {
+        let releases = || {
+            serde_json::from_value::<Vec<GitHubRelease>>(serde_json::json!([
+            { "tag_name": "v0.1.2", "assets": [] },
+            { "tag_name": "ffmpeg-components-8.1.2", "assets": [
+                { "name": "ffmpeg-macos-arm64.tar.gz", "browser_download_url": "https://example.com/package", "size": 1 }
+            ] }
+        ])).unwrap()
+        };
+        assert!(select_macos_ffmpeg_release(Vec::new(), "ffmpeg-macos-arm64.tar.gz").is_none());
+        assert!(select_macos_ffmpeg_release(releases(), "ffmpeg-macos-x64.tar.gz").is_none());
+        assert_eq!(
+            select_macos_ffmpeg_release(releases(), "ffmpeg-macos-arm64.tar.gz")
+                .unwrap()
+                .tag_name,
+            "ffmpeg-components-8.1.2"
+        );
+    }
 
     #[cfg(target_os = "windows")]
     #[test]
