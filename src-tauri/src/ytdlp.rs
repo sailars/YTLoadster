@@ -617,11 +617,13 @@ async fn run_json_probe(
 ) -> Result<String, ProbeFailure> {
     let materialized_cookies = if matches!(&cookie_source, Some(CookieSource::YoutubeSession)) {
         Some(
-            crate::auth::materialize_youtube_cookies(app).map_err(|message| ProbeFailure {
-                message,
-                browser: None,
-                missing_tool: false,
-            })?,
+            crate::auth::materialize_youtube_cookies(app)
+                .await
+                .map_err(|message| ProbeFailure {
+                    message,
+                    browser: None,
+                    missing_tool: false,
+                })?,
         )
     } else {
         None
@@ -897,6 +899,7 @@ fn classify_probe_issue(failure: &ProbeFailure) -> ProbeIssue {
     } else if normalized.contains("sign in")
         || normalized.contains("login required")
         || normalized.contains("cookies")
+        || normalized.contains("youtube-auth-session-unavailable")
     {
         (ProbeIssueCode::AuthenticationRequired, false, true)
     } else if normalized.contains(ANALYSIS_TIMEOUT_CODE)
@@ -906,6 +909,7 @@ fn classify_probe_issue(failure: &ProbeFailure) -> ProbeIssue {
         || normalized.contains("network")
         || normalized.contains("name resolution")
         || normalized.contains("dns")
+        || normalized.contains("youtube-auth-refresh-failed")
     {
         (ProbeIssueCode::Network, true, false)
     } else {
@@ -1017,14 +1021,14 @@ pub fn humanize_ytdlp_error(message: &str) -> String {
     if normalized.contains("sign in to confirm your age")
         || normalized.contains("confirm your age to watch")
     {
-        return "Для этого видео YouTube требует войти в аккаунт и подтвердить возраст. Откройте Настройки → Вход в YouTube, выполните вход и повторите попытку. Если вход уже выполнен, убедитесь, что возраст подтверждён в аккаунте.".to_string();
+        return "Для этого видео YouTube требует войти в аккаунт и подтвердить возраст. Откройте Настройки → Авторизация → Войти в YouTube, выполните вход и повторите попытку. Если вход уже выполнен, убедитесь, что возраст подтверждён в аккаунте.".to_string();
     }
 
     if normalized.contains("sign in to confirm you're not a bot")
         || normalized.contains("sign in to confirm you’re not a bot")
         || normalized.contains("sign in to confirm you are not a bot")
     {
-        return "YouTube просит подтвердить, что вы не робот. Войдите в аккаунт YouTube/авторизуйтесь через браузер в настройках приложения и повторите попытку.".to_string();
+        return "YouTube просит подтвердить, что вы не робот. Откройте Настройки → Авторизация → Войти в YouTube, выполните вход и повторите попытку.".to_string();
     }
 
     if normalized.contains("http error 429") || normalized.contains("429: too many requests") {
@@ -1032,7 +1036,7 @@ pub fn humanize_ytdlp_error(message: &str) -> String {
     }
 
     if normalized.contains("http error 403") || normalized.contains("403: forbidden") {
-        return "YouTube временно отклонил запрос к видео (ошибка 403). Повторите загрузку чуть позже. Если ошибка повторяется, попробуйте уменьшить число одновременных загрузок или включить вход из браузера в настройках.".to_string();
+        return "YouTube временно отклонил запрос к видео (ошибка 403). Повторите загрузку чуть позже. Если ошибка повторяется, попробуйте уменьшить число одновременных загрузок или включить Настройки → Авторизация → Использовать вход из браузера.".to_string();
     }
 
     if normalized.contains("requested format is not available") {
@@ -1053,7 +1057,7 @@ pub fn humanize_ytdlp_error(message: &str) -> String {
     if normalized.contains("failed to decrypt with dpapi")
         || (normalized.contains("dpapi") && normalized.contains("failed to decrypt"))
     {
-        return "Не удалось расшифровать cookies выбранного Chromium-браузера через защиту Windows (DPAPI). Некоторые Chromium-браузеры дополнительно защищают cookies, и программа не может их прочитать. Это не ошибка загрузчика: используйте Firefox/LibreWolf для входа или отключите вход через браузер".to_string();
+        return "Не удалось расшифровать cookies выбранного Chromium-браузера через защиту Windows (DPAPI). Некоторые Chromium-браузеры дополнительно защищают cookies, и программа не может их прочитать. Это не ошибка YTLoadster. Используйте Firefox/LibreWolf для авторизации или используйте \"Войти в YouTube\".".to_string();
     }
 
     if normalized.contains("could not find")
@@ -2052,6 +2056,18 @@ mod tests {
             ),
             ("Connection timed out", ProbeIssueCode::Network, true, false),
             (
+                "youtube-auth-refresh-failed",
+                ProbeIssueCode::Network,
+                true,
+                false,
+            ),
+            (
+                "youtube-auth-session-unavailable",
+                ProbeIssueCode::AuthenticationRequired,
+                false,
+                true,
+            ),
+            (
                 "Unexpected extractor failure",
                 ProbeIssueCode::Unknown,
                 false,
@@ -2206,7 +2222,7 @@ mod tests {
 
         assert_eq!(
             message,
-            "Не удалось расшифровать cookies выбранного Chromium-браузера через защиту Windows (DPAPI). Некоторые Chromium-браузеры дополнительно защищают cookies, и программа не может их прочитать. Это не ошибка загрузчика: используйте Firefox/LibreWolf для входа или отключите вход через браузер"
+            "Не удалось расшифровать cookies выбранного Chromium-браузера через защиту Windows (DPAPI). Некоторые Chromium-браузеры дополнительно защищают cookies, и программа не может их прочитать. Это не ошибка YTLoadster. Используйте Firefox/LibreWolf для авторизации или используйте \"Войти в YouTube\"."
         );
     }
 
@@ -2282,7 +2298,7 @@ mod tests {
 
         assert_eq!(
             humanize_ytdlp_error(raw),
-            "Для этого видео YouTube требует войти в аккаунт и подтвердить возраст. Откройте Настройки → Вход в YouTube, выполните вход и повторите попытку. Если вход уже выполнен, убедитесь, что возраст подтверждён в аккаунте."
+            "Для этого видео YouTube требует войти в аккаунт и подтвердить возраст. Откройте Настройки → Авторизация → Войти в YouTube, выполните вход и повторите попытку. Если вход уже выполнен, убедитесь, что возраст подтверждён в аккаунте."
         );
     }
 
@@ -2292,7 +2308,7 @@ mod tests {
 
         assert_eq!(
             humanize_ytdlp_error(raw),
-            "YouTube просит подтвердить, что вы не робот. Войдите в аккаунт YouTube/авторизуйтесь через браузер в настройках приложения и повторите попытку."
+            "YouTube просит подтвердить, что вы не робот. Откройте Настройки → Авторизация → Войти в YouTube, выполните вход и повторите попытку."
         );
     }
 
@@ -2325,7 +2341,7 @@ mod tests {
 
         assert_eq!(
             message,
-            "YouTube временно отклонил запрос к видео (ошибка 403). Повторите загрузку чуть позже. Если ошибка повторяется, попробуйте уменьшить число одновременных загрузок или включить вход из браузера в настройках."
+            "YouTube временно отклонил запрос к видео (ошибка 403). Повторите загрузку чуть позже. Если ошибка повторяется, попробуйте уменьшить число одновременных загрузок или включить Настройки → Авторизация → Использовать вход из браузера."
         );
     }
 

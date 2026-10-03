@@ -165,11 +165,9 @@ pub fn run() {
             auth::cancel_youtube_auth,
             auth::cancel_youtube_webview_auth,
             auth::clear_youtube_auth,
-            auth::complete_youtube_auth,
             auth::get_youtube_webview_auth_state,
             auth::get_youtube_auth_window_state,
             auth::get_youtube_auth_status,
-            auth::prepare_youtube_auth_capture,
             auth::sign_out_youtube,
             auth::start_youtube_auth,
             auth::start_youtube_webview_auth,
@@ -216,6 +214,7 @@ pub fn run() {
             if lifecycle.begin_cleanup() {
                 app_handle.state::<downloads::DownloadManager>().shutdown();
                 app_handle.state::<power::SleepInhibitor>().shutdown();
+                app_handle.state::<auth::YoutubeAuthManager>().shutdown();
             }
         }
         #[cfg(target_os = "macos")]

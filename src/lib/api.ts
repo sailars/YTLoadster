@@ -18,7 +18,6 @@ import type {
   YoutubeAuthStatus,
   YoutubeAuthWindowState,
   YoutubeWebviewAuthState,
-  BrowserCookie,
   BatchDownloadItem,
   BatchEnqueueResult,
   DownloadFinishedEvent,
@@ -171,12 +170,6 @@ export const api = {
   },
   getYoutubeAuthWindowState() {
     return invoke<YoutubeAuthWindowState>("get_youtube_auth_window_state");
-  },
-  prepareYoutubeAuthCapture() {
-    return invoke<YoutubeAuthStart>("prepare_youtube_auth_capture");
-  },
-  completeYoutubeAuth(browser: string, cookies: BrowserCookie[]) {
-    return invoke<YoutubeAuthStatus>("complete_youtube_auth", { browser, cookies });
   },
   signOutYoutube() {
     return invoke<YoutubeAuthStatus>("sign_out_youtube");

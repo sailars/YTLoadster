@@ -29,7 +29,7 @@ export type ComponentUpdateStatus = {
   id: ComponentId;
   currentVersion: string | null;
   latestVersion: string | null;
-  state: "available" | "upToDate" | "unavailable";
+  state: "available" | "upToDate" | "unavailable" | "notPublished" | "newerRelease";
   sourceUrl: string | null;
 };
 
@@ -138,12 +138,12 @@ export type YoutubeAuthStatus = {
 
 export type YoutubeAuthStart = {
   browser: string;
-  websocketUrl?: string | null;
 };
 
 export type YoutubeAuthWindowState = {
   open: boolean;
   sessionDetected: boolean;
+  status: YoutubeAuthStatus;
 };
 
 export type YoutubeWebviewAuthState = {
@@ -151,16 +151,7 @@ export type YoutubeWebviewAuthState = {
   authenticated: boolean;
 };
 
-export type YoutubeAuthPhase = "idle" | "opening" | "waiting" | "finishing" | "capturing" | "success" | "cleared" | "error";
-
-export type BrowserCookie = {
-  name: string;
-  value: string;
-  domain: string;
-  path: string;
-  expires: number;
-  secure: boolean;
-};
+export type YoutubeAuthPhase = "idle" | "opening" | "waiting" | "success" | "cleared" | "error";
 
 export type AppSettings = {
   defaultDownloadDir?: string | null;

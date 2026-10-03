@@ -4,10 +4,12 @@ import {
   isYouTubeAgeRestrictionError,
   isYouTubeBotConfirmationError,
   isYouTubeRateLimitError,
+  isYouTubeForbiddenError,
   sanitizeTechnicalError,
 } from "../lib/errors";
 import { localizeTechnicalText, useI18n, type AppLocale, type Translate, type TranslationKey } from "../lib/i18n";
 import { MediaThumbnail } from "./MediaThumbnail";
+import { localizedYoutubeAuthError } from "../lib/youtubeAuth";
 
 const insufficientDiskSpaceError = "download-error:insufficient-disk-space";
 const missingFfmpegError = "download-error:missing-ffmpeg";
@@ -328,11 +330,14 @@ function downloadParameters(job: Job, locale: AppLocale, t: Translate) {
 }
 
 function localizedJobError(error: string, locale: "ru" | "en", t: Translate) {
+  const authError = localizedYoutubeAuthError(error, t);
+  if (authError) return authError;
   if (error === insufficientDiskSpaceError) return t("error.insufficientDiskSpace");
   if (error === missingFfmpegError) return t("error.missingFfmpeg");
   if (isYouTubeAgeRestrictionError(error)) return t("error.ageRestricted");
   if (isYouTubeBotConfirmationError(error)) return t("error.botConfirmation");
   if (isYouTubeRateLimitError(error)) return t("error.rateLimited");
+  if (isYouTubeForbiddenError(error)) return t("error.forbidden");
   if (locale === "en" && /[А-Яа-яЁё]/.test(error)) return t("error.unknown");
   return sanitizeTechnicalError(error, locale === "ru" ? "программа" : "application");
 }

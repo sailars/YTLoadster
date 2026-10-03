@@ -1048,7 +1048,7 @@ async fn run_download(
     let _sleep_guard = app.state::<SleepInhibitor>().begin_download();
     let materialized_cookies =
         if matches!(request.cookie_source, Some(CookieSource::YoutubeSession)) {
-            match crate::auth::materialize_youtube_cookies(&app) {
+            match crate::auth::materialize_youtube_cookies(&app).await {
                 Ok(cookies) => Some(cookies),
                 Err(error) => {
                     emit_job(&app, manager.mark_failed(job_id, error));
