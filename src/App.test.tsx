@@ -41,7 +41,6 @@ vi.mock("./lib/api", () => ({
       proxyUsername: "",
       proxyPasswordSet: false,
     }),
-    playCompletionSound: vi.fn().mockResolvedValue(undefined),
     getYoutubeAuthStatus: vi.fn().mockResolvedValue({
       supported: true,
       authenticated: false,
@@ -628,6 +627,7 @@ describe("App", () => {
     expect(api.showSystemNotification).toHaveBeenCalledWith(
       "Уведомления включены",
       "Программа сообщит, когда загрузка завершится.",
+      false,
     );
   });
 
@@ -656,6 +656,8 @@ describe("App", () => {
     await waitFor(() => expect(enableButton).toHaveAttribute("aria-busy", "true"));
     expect(enableButton).toHaveAttribute("aria-disabled", "true");
     expect(enableButton).not.toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    expect(screen.getByRole("switch", { name: /звук при завершении загрузки/i })).toBeDisabled();
 
     await act(async () => resolvePermission(true));
     await waitFor(() => {
@@ -692,10 +694,12 @@ describe("App", () => {
     expect(api.showSystemNotification).toHaveBeenCalledWith(
       "Загрузка завершена",
       "Файл «Finished Video» успешно сохранён на устройство.",
+      true,
     );
   });
 
-  it("plays the completion sound once for duplicate completion events", async () => {
+  it("requests one notification with its native sound for duplicate completion events", async () => {
+    window.localStorage.setItem(notificationsStorageKey, "true");
     const initialSettings = await api.getSettings();
     vi.mocked(api.getSettings).mockResolvedValueOnce({ ...initialSettings, completionSoundEnabled: true });
     let onUpdated: ((job: Job) => void) | undefined;
@@ -713,7 +717,97 @@ describe("App", () => {
       onUpdated?.(completedJob);
       onFinished?.({ job: completedJob, outputPath: "D:/Video/Finished.mp4", history: null });
     });
-    expect(api.playCompletionSound).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(api.showSystemNotification).toHaveBeenCalledTimes(1));
+    expect(api.showSystemNotification).toHaveBeenCalledWith("Загрузка завершена", expect.any(String), true);
+  });
+
+  it.each(["sidebar", "settings"])("synchronizes completion notifications and sound from %s and restores the choice", async (source) => {
+    const view = render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    const soundSwitch = screen.getByRole("switch", { name: /звук при завершении загрузки/i });
+    expect(soundSwitch).not.toBeChecked();
+
+    await userEvent.click(source === "settings" ? soundSwitch : screen.getByRole("button", { name: /включить уведомления/i }));
+    await waitFor(() => expect(soundSwitch).toBeChecked());
+    await waitFor(() => expect(soundSwitch).not.toBeDisabled());
+    expect(screen.getByRole("button", { name: /выключить уведомления/i })).toHaveAttribute("aria-pressed", "true");
+    expect(api.updateSettings).toHaveBeenLastCalledWith({ completionSoundEnabled: true });
+    expect(window.localStorage.getItem(notificationsStorageKey)).toBe("true");
+
+    view.unmount();
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    const restoredSwitch = screen.getByRole("switch", { name: /звук при завершении загрузки/i });
+    expect(restoredSwitch).toBeChecked();
+    await userEvent.click(source === "settings" ? restoredSwitch : screen.getByRole("button", { name: /выключить уведомления/i }));
+    await waitFor(() => expect(restoredSwitch).not.toBeChecked());
+    expect(screen.getByRole("button", { name: /включить уведомления/i })).toHaveAttribute("aria-pressed", "false");
+    expect(api.updateSettings).toHaveBeenLastCalledWith({ completionSoundEnabled: false });
+    expect(window.localStorage.getItem(notificationsStorageKey)).toBe("false");
+  });
+
+  it("does not play a completion sound when notifications are disabled despite the old sound setting", async () => {
+    const initialSettings = await api.getSettings();
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...initialSettings, completionSoundEnabled: true });
+    window.localStorage.setItem(notificationsStorageKey, "false");
+    let onUpdated!: (job: Job) => void;
+    let onFinished!: (event: { job: Job; outputPath: string; history: null }) => void;
+    vi.mocked(api.onDownloadUpdated).mockImplementationOnce(async (callback) => { onUpdated = callback; return () => undefined; });
+    vi.mocked(api.onDownloadFinished).mockImplementationOnce(async (callback) => { onFinished = callback; return () => undefined; });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    expect(screen.getByRole("switch", { name: /звук при завершении загрузки/i })).not.toBeChecked();
+    const job: Job = { id: 74, state: "Completed", request: { url: "https://youtube.com/watch?v=muted", preset: "mp4Video", destinationDir: "D:/Video" } };
+    await act(async () => {
+      onUpdated(job);
+      onFinished({ job, outputPath: "D:/Video/muted.mp4", history: null });
+    });
+    expect(api.showSystemNotification).not.toHaveBeenCalled();
+  });
+
+  it("keeps both completion controls disabled when notification permission is denied from settings", async () => {
+    vi.mocked(isPermissionGranted).mockResolvedValueOnce(false);
+    vi.mocked(requestPermission).mockResolvedValueOnce("denied");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    const soundSwitch = screen.getByRole("switch", { name: /звук при завершении загрузки/i });
+    await userEvent.click(soundSwitch);
+    await waitFor(() => expect(requestPermission).toHaveBeenCalled());
+    await waitFor(() => expect(soundSwitch).not.toBeDisabled());
+    expect(soundSwitch).not.toBeChecked();
+    expect(screen.getByRole("button", { name: /включить уведомления/i })).toHaveAttribute("aria-pressed", "false");
+    expect(window.localStorage.getItem(notificationsStorageKey)).toBe("false");
+    expect(api.showSystemNotification).not.toHaveBeenCalled();
+  });
+
+  it("disables both completion controls without sound when a completion notification fails", async () => {
+    window.localStorage.setItem(notificationsStorageKey, "true");
+    vi.mocked(api.showSystemNotification).mockRejectedValueOnce(new Error("notification unavailable"));
+    let onUpdated!: (job: Job) => void;
+    vi.mocked(api.onDownloadUpdated).mockImplementationOnce(async (callback) => { onUpdated = callback; return () => undefined; });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    await act(async () => onUpdated({ id: 75, state: "Completed", request: { url: "https://youtube.com/watch?v=failed-toast", preset: "mp4Video", destinationDir: "D:/Video" } }));
+    await waitFor(() => expect(screen.getByRole("switch", { name: /звук при завершении загрузки/i })).not.toBeChecked());
+    expect(screen.getByRole("button", { name: /включить уведомления/i })).toHaveAttribute("aria-pressed", "false");
+    expect(api.showSystemNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send more completion notifications after switching off during delivery", async () => {
+    window.localStorage.setItem(notificationsStorageKey, "true");
+    let finishNotification!: () => void;
+    vi.mocked(api.showSystemNotification).mockImplementationOnce(() => new Promise<void>((resolve) => { finishNotification = resolve; }));
+    let onUpdated!: (job: Job) => void;
+    vi.mocked(api.onDownloadUpdated).mockImplementationOnce(async (callback) => { onUpdated = callback; return () => undefined; });
+    render(<App />);
+    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
+    await act(async () => onUpdated({ id: 76, state: "Completed", request: { url: "https://youtube.com/watch?v=late-toast", preset: "mp4Video", destinationDir: "D:/Video" } }));
+    await waitFor(() => expect(finishNotification).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: /выключить уведомления/i }));
+    await act(async () => finishNotification());
+    await act(async () => onUpdated({ id: 77, state: "Completed", request: { url: "https://youtube.com/watch?v=next-toast", preset: "mp4Video", destinationDir: "D:/Video" } }));
+    expect(api.showSystemNotification).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem(notificationsStorageKey)).toBe("false");
   });
 
   it("restores the saved dark theme", async () => {

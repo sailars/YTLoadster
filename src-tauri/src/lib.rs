@@ -172,7 +172,6 @@ pub fn run() {
             auth::start_youtube_auth,
             auth::start_youtube_webview_auth,
             notifications::show_system_notification,
-            notifications::play_completion_sound,
             downloads::cancel_all_jobs,
             downloads::cancel_job,
             downloads::clear_jobs,

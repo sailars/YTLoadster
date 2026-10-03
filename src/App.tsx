@@ -141,9 +141,9 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   const youtubeAuthAttempt = useRef(0);
   const automaticUpdateCheckStarted = useRef(false);
   const notificationsEnabledRef = useRef(notificationsEnabled);
-  const completionSoundEnabledRef = useRef(false);
+  const notificationChangePending = useRef(false);
+  const notificationPreferenceVersion = useRef(0);
   const themeTransitionId = useRef(0);
-  const soundedJobs = useRef(new Set<number>());
   const localeRef = useRef(locale);
   const notifiedJobs = useRef(new Set<number>());
   const [appSettings, setAppSettings] = useState<AppSettings>({
@@ -160,7 +160,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     playlistFormatSelectionMode: "strict",
     preventSystemSleepWhileDownloading: false,
     minimizeToTray: true,
-    completionSoundEnabled: false,
+    completionSoundEnabled: notificationsEnabled,
     showThumbnails: true,
     accentColor: "blue",
     proxyMode: "system",
@@ -195,7 +195,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
       .catch(() => setPlatform("unknown"));
     api
       .getSettings()
-      .then((settings) => { setAppSettings(settings); completionSoundEnabledRef.current = settings.completionSoundEnabled; })
+      .then((settings) => setAppSettings({ ...settings, completionSoundEnabled: notificationsEnabledRef.current }))
       .catch(() => setAppSettings({
         concurrency: 2,
         fragmentConcurrency: 1,
@@ -210,7 +210,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
         playlistFormatSelectionMode: "strict",
         preventSystemSleepWhileDownloading: false,
         minimizeToTray: true,
-        completionSoundEnabled: false,
+        completionSoundEnabled: notificationsEnabledRef.current,
         showThumbnails: true,
         accentColor: "blue",
         proxyMode: "system",
@@ -246,20 +246,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
       setJobs((current) => updatedJob.state === "Completed"
         ? current.filter((job) => job.id !== updatedJob.id)
         : upsertJob(current, updatedJob));
-      if (updatedJob.state === "Completed" && notificationsEnabledRef.current && !notifiedJobs.current.has(updatedJob.id)) {
-        notifiedJobs.current.add(updatedJob.id);
-        void showDownloadCompletedNotification(updatedJob.request.title, localeRef.current).then((shown) => {
-          if (!shown) {
-            notificationsEnabledRef.current = false;
-            saveNotificationsEnabled(false);
-            setNotificationsEnabled(false);
-          }
-        });
-      }
-      if (updatedJob.state === "Completed" && completionSoundEnabledRef.current && !soundedJobs.current.has(updatedJob.id)) {
-        soundedJobs.current.add(updatedJob.id);
-        void api.playCompletionSound().catch(() => undefined);
-      }
+      if (updatedJob.state === "Completed") notifyDownloadCompleted(updatedJob);
     });
     const unlistenFinished = api.onDownloadFinished((event) => {
       setJobs((current) => current.filter((job) => job.id !== event.job.id));
@@ -271,20 +258,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
         setHistory((current) => [event.history!, ...current.filter((item) => item.id !== event.history!.id)]);
       }
       if (event.historyError) setHistoryWriteFailurePath(event.outputPath);
-      if (notificationsEnabledRef.current && !notifiedJobs.current.has(event.job.id)) {
-        notifiedJobs.current.add(event.job.id);
-        void showDownloadCompletedNotification(event.job.request.title, localeRef.current).then((shown) => {
-          if (!shown) {
-            notificationsEnabledRef.current = false;
-            saveNotificationsEnabled(false);
-            setNotificationsEnabled(false);
-          }
-        });
-      }
-      if (completionSoundEnabledRef.current && !soundedJobs.current.has(event.job.id)) {
-        soundedJobs.current.add(event.job.id);
-        void api.playCompletionSound().catch(() => undefined);
-      }
+      notifyDownloadCompleted(event.job);
     });
 
     return () => {
@@ -347,13 +321,8 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   }, [locale]);
 
   useEffect(() => {
-    notificationsEnabledRef.current = notificationsEnabled;
-  }, [notificationsEnabled]);
-
-  useEffect(() => {
-    completionSoundEnabledRef.current = appSettings.completionSoundEnabled;
     document.documentElement.dataset.accent = appSettings.accentColor;
-  }, [appSettings.completionSoundEnabled, appSettings.accentColor]);
+  }, [appSettings.accentColor]);
 
   useEffect(() => {
     applyTheme(theme);
@@ -422,11 +391,13 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   };
 
   const updateAppSettings = (patch: SettingsPatch) => {
+    if (patch.completionSoundEnabled !== undefined) {
+      return changeNotifications(patch.completionSoundEnabled);
+    }
     return api
       .updateSettings(patch)
       .then((settings) => {
-        setAppSettings(settings);
-        completionSoundEnabledRef.current = settings.completionSoundEnabled;
+        setAppSettings({ ...settings, completionSoundEnabled: notificationsEnabledRef.current });
         if (patch.defaultDownloadDir !== undefined) {
           setDefaultDestinationDir(settings.defaultDownloadDir ?? "Downloads");
         }
@@ -633,26 +604,60 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     }
   };
 
-  const toggleNotifications = async () => {
-    if (notificationsEnabled) {
-      saveNotificationsEnabled(false);
-      setNotificationsEnabled(false);
-      return;
-    }
+  function applyNotificationsEnabled(enabled: boolean) {
+    notificationPreferenceVersion.current += 1;
+    notificationsEnabledRef.current = enabled;
+    saveNotificationsEnabled(enabled);
+    setNotificationsEnabled(enabled);
+    setAppSettings((current) => ({ ...current, completionSoundEnabled: enabled }));
+  }
 
+  function persistCompletionPreference(enabled: boolean) {
+    return api.updateSettings({ completionSoundEnabled: enabled }).then((settings) => {
+      setAppSettings({ ...settings, completionSoundEnabled: notificationsEnabledRef.current });
+    }).catch(() => undefined);
+  }
+
+  function notifyDownloadCompleted(job: Job) {
+    if (!notificationsEnabledRef.current || notifiedJobs.current.has(job.id)) return;
+    notifiedJobs.current.add(job.id);
+    const preferenceVersion = notificationPreferenceVersion.current;
+    void showDownloadCompletedNotification(job.request.title, localeRef.current).then((shown) => {
+      if (preferenceVersion !== notificationPreferenceVersion.current || !notificationsEnabledRef.current) return;
+      if (!shown) {
+        applyNotificationsEnabled(false);
+        void persistCompletionPreference(false);
+        return;
+      }
+    });
+  }
+
+  async function changeNotifications(requestedEnabled: boolean): Promise<boolean> {
+    if (notificationChangePending.current) return false;
+    notificationChangePending.current = true;
     setNotificationPermissionPending(true);
     try {
+      if (!requestedEnabled) {
+        applyNotificationsEnabled(false);
+        await persistCompletionPreference(false);
+        return true;
+      }
       const granted = await requestNotificationAccess();
-      const enabled = granted && await showNotificationsEnabledNotification(locale);
-      saveNotificationsEnabled(enabled);
-      setNotificationsEnabled(enabled);
+      const enabled = granted && await showNotificationsEnabledNotification(localeRef.current);
+      applyNotificationsEnabled(enabled);
+      await persistCompletionPreference(enabled);
+      return enabled;
     } catch {
-      saveNotificationsEnabled(false);
-      setNotificationsEnabled(false);
+      applyNotificationsEnabled(false);
+      await persistCompletionPreference(false);
+      return false;
     } finally {
+      notificationChangePending.current = false;
       setNotificationPermissionPending(false);
     }
-  };
+  }
+
+  const toggleNotifications = () => changeNotifications(!notificationsEnabledRef.current);
 
   const playlistSourceKind = classifyYoutubeSource(playlistUrl);
   const newDownloadSourceKind = classifyYoutubeSource(newDownloadUrl);
@@ -825,6 +830,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
                 isOpen
                 settings={authSettings}
                 downloadSettings={appSettings}
+                notificationPending={notificationPermissionPending}
                 platform={platform}
                 locale={locale}
                 theme={theme}

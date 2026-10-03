@@ -28,6 +28,8 @@ YTLoadster is a desktop application for downloading video, audio, and subtitles 
 
 Settings open as a section in the sidebar. General contains language, completion sound, sleep prevention, close-to-tray, and automatic update checks. Downloads lets you choose a default folder for new single downloads and playlists, a filename template, what to do when a name exists (rename or replace), concurrent downloads and fragments, playlist format matching, and retry counts. You can still choose a different folder for an individual download before adding it to the queue.
 
+The sidebar Notifications button and the General setting "Sound when a download finishes" control the same preference: notifications and sound turn on and off together. Your choice is kept after restarting. If the OS does not allow notifications, both controls remain off. Completed downloads use the default Windows or macOS notification sound, subject to the system's notification sound settings and Do Not Disturb mode.
+
 Network offers system proxy, no proxy, and manual HTTP, HTTPS, or SOCKS5 with username and password, as well as a custom User-Agent. System proxy and no proxy apply immediately; enter the details and press "Save" for a manual proxy. No proxy means that the application adds no proxy of its own; it does not disable system routing, VPNs, or system proxy clients. Proxy passwords are protected by Windows DPAPI or the macOS Keychain. Authorization contains the existing sign-in options. Appearance offers theme, accent color, and thumbnails in Playlist, Queue, and History. The queue is not restored after an app restart yet.
 
 ## Platforms and releases

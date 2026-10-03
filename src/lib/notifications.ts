@@ -28,9 +28,9 @@ export async function requestNotificationAccess() {
   return (await requestPermission()) === "granted";
 }
 
-async function showSystemNotification(title: string, body: string) {
+async function showSystemNotification(title: string, body: string, sound: boolean) {
   try {
-    await api.showSystemNotification(title, body);
+    await api.showSystemNotification(title, body, sound);
     return true;
   } catch {
     return false;
@@ -41,6 +41,7 @@ export function showNotificationsEnabledNotification(locale: AppLocale) {
   return showSystemNotification(
     translate(locale, "notifications.enabledTitle"),
     translate(locale, "notifications.enabledBody"),
+    false,
   );
 }
 
@@ -51,6 +52,7 @@ export async function showDownloadCompletedNotification(title: string | null | u
     return await showSystemNotification(
       translate(locale, "notifications.completedTitle"),
       translate(locale, "notifications.completedBody", { title: displayTitle }),
+      true,
     );
   } catch {
     return false;
