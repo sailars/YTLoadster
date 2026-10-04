@@ -4,7 +4,7 @@
 
 YTLoadster is a desktop application for downloading video, audio, and subtitles from YouTube.
 
-> The current release is `0.1.1` for Windows and macOS. Use the application in accordance with website terms, applicable laws, and copyright holders' rights.
+> The current release is `0.1.2` for Windows and macOS. [Download this release](https://github.com/sailars/YTLoadster/releases/tag/v0.1.2). Use the application in accordance with website terms, applicable laws, and copyright holders' rights.
 
 <img width="1232" height="710" alt="YTLoadster main window" src="https://github.com/user-attachments/assets/55b230c8-b4d4-4181-a1e4-0e7f889e3589" />
 
@@ -24,7 +24,7 @@ YTLoadster is a desktop application for downloading video, audio, and subtitles 
 - Authentication using browser cookies.
 - YouTube sign-in through an isolated browser profile that does not affect the user's regular profile.
 
-## Settings in the v0.1.2 branch
+## Settings
 
 Settings open as a section in the sidebar. General contains language, completion sound, sleep prevention, close-to-tray, and automatic update checks. Downloads lets you choose a default folder for new single downloads and playlists, a filename template, what to do when a name exists (rename or replace), concurrent downloads and fragments, playlist format matching, and retry counts. You can still choose a different folder for an individual download before adding it to the queue.
 
