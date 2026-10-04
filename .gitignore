@@ -32,31 +32,3 @@ src-tauri/resources/macos/DENO_MIT.txt
 src-tauri/resources/macos/YTDLP_GPL-3.0.txt
 src-tauri/resources/macos/FFMPEG_LGPL-2.1.txt
 src-tauri/resources/macos/LAME_LGPL-2.0.txt
-
-# Локальные референсы, загрузки и рабочие материалы вне репозитория.
-/1.png
-/2.png
-/3.png
-/Download & upload hover effects.mp4
-/deno-aarch64-apple-darwin/
-/deno-x86_64-apple-darwin/
-/design-references/
-/docs.rar
-/macOS (Apple Silicon arm64)/
-/macOS (Intel amd64)/
-/new design.md
-/new_design_1.png
-/new_design_2.png
-
-# Локальные рабочие документы и исходные материалы. Они остаются на компьютере,
-# но не являются частью публичного исходного репозитория.
-/AGENTS.md
-/ARCHITECTURE_AND_PLAN.md
-/CHANGELOG.md
-/DOWNLOAD_NAMING_AND_DUPLICATE_PROTECTION_PLAN.md
-/MEDIA_DUPLICATE_PROTECTION_PLAN.md
-/NEW_DESIGN_AND_VIDEO_PROFILES_PLAN.md
-/note.md
-/Подготовка к публикации на GitHub.md
-/app-icon.svg
-/logo.png
