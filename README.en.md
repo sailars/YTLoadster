@@ -74,8 +74,6 @@ npm.cmd run tauri -- dev
 
 Run these commands from the repository root. On macOS and Linux, use `npm` instead of `npm.cmd`.
 
-On Windows, Rust build output and its cache use `G:\ytloadster_dev`. The launch command sets this path regardless of the inherited `CARGO_TARGET_DIR`; drive G must be available. Run Rust checks with `npm.cmd run cargo -- test --manifest-path src-tauri/Cargo.toml`, adding a test filter when needed.
-
 ## Privacy and YouTube sign-in
 
 For the "Sign in to YouTube" flow, the application opens an isolated profile in the selected installed Chromium-based browser. After sign-in, only YouTube cookies are stored: they are protected by DPAPI on Windows and by the system Keychain on macOS. The application does not receive the user's password and does not modify the regular browser profile or any already open browser windows.
