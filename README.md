@@ -4,7 +4,7 @@
 
 YTLoadster - desktop приложение для скачивания видео, аудио и субтитров с YouTube.
 
-<img width="1232" height="710" alt="Главное окно YTLoadster" src="https://github.com/user-attachments/assets/14f11add-4558-4bc8-b456-0181d5a508f9" />
+<img width="1320" height="765" alt="Главное окно YTLoadster" src="https://github.com/user-attachments/assets/fbf5a8a6-76a3-4944-af21-2c9e673c9700" />
 
 ## Возможности
 
