@@ -55,6 +55,7 @@
 | bitflags | 1.3.2 | MIT/Apache-2.0 | https://github.com/bitflags/bitflags |
 | bitflags | 2.13.0 | MIT OR Apache-2.0 | https://github.com/bitflags/bitflags |
 | block-buffer | 0.10.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
+| block-buffer | 0.12.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | block2 | 0.6.2 | MIT | https://github.com/madsmtm/objc2 |
 | blocking | 1.6.2 | Apache-2.0 OR MIT | https://github.com/smol-rs/blocking |
 | brotli | 8.0.4 | BSD-3-Clause AND MIT | https://github.com/dropbox/rust-brotli |
@@ -76,10 +77,12 @@
 | cfb | 0.7.3 | MIT | https://github.com/mdsteele/rust-cfb |
 | cfg-expr | 0.15.8 | MIT OR Apache-2.0 | https://github.com/EmbarkStudios/cfg-expr |
 | cfg-if | 1.0.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
+| chacha20 | 0.10.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/stream-ciphers |
 | chrono | 0.4.45 | MIT OR Apache-2.0 | https://github.com/chronotope/chrono |
 | clipboard-win | 5.4.1 | BSL-1.0 | https://github.com/DoumanAsh/clipboard-win |
 | combine | 4.6.7 | MIT | https://github.com/Marwes/combine |
 | concurrent-queue | 2.5.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/concurrent-queue |
+| const-oid | 0.10.2 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | cookie | 0.18.1 | MIT OR Apache-2.0 | https://github.com/SergioBenitez/cookie-rs |
 | core-foundation | 0.9.4 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | core-foundation | 0.10.1 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
@@ -87,11 +90,13 @@
 | core-graphics | 0.25.0 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | core-graphics-types | 0.2.0 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
+| cpufeatures | 0.3.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | crc32fast | 1.5.0 | MIT OR Apache-2.0 | https://github.com/srijs/rust-crc32fast |
 | crossbeam-channel | 0.5.16 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crossbeam-utils | 0.8.22 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crunchy | 0.2.4 | MIT | https://github.com/eira-fransham/crunchy |
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| crypto-common | 0.2.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | cssparser | 0.36.0 | MPL-2.0 | https://github.com/servo/rust-cssparser |
 | cssparser-macros | 0.6.1 | MPL-2.0 | https://github.com/servo/rust-cssparser |
 | ctor | 0.8.0 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
@@ -99,11 +104,13 @@
 | darling | 0.23.0 | MIT | https://github.com/TedDriggs/darling |
 | darling_core | 0.23.0 | MIT | https://github.com/TedDriggs/darling |
 | darling_macro | 0.23.0 | MIT | https://github.com/TedDriggs/darling |
+| data-encoding | 2.11.1 | MIT | https://github.com/ia0/data-encoding |
 | dbus | 0.9.12 | Apache-2.0/MIT | https://github.com/diwic/dbus-rs |
 | deranged | 0.5.8 | MIT OR Apache-2.0 | https://github.com/jhpratt/deranged |
 | derive_more | 2.1.1 | MIT | https://github.com/JelteF/derive_more |
 | derive_more-impl | 2.1.1 | MIT | https://github.com/JelteF/derive_more |
 | digest | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| digest | 0.11.3 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | dirs | 6.0.0 | MIT OR Apache-2.0 | https://github.com/soc/dirs-rs |
 | dirs-sys | 0.5.0 | MIT OR Apache-2.0 | https://github.com/dirs-dev/dirs-sys-rs |
 | dispatch2 | 0.3.1 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
@@ -194,6 +201,7 @@
 | http-body | 1.0.1 | MIT | https://github.com/hyperium/http-body |
 | http-body-util | 0.1.3 | MIT | https://github.com/hyperium/http-body |
 | httparse | 1.10.1 | MIT OR Apache-2.0 | https://github.com/seanmonstar/httparse |
+| hybrid-array | 0.4.15 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hybrid-array |
 | hyper | 1.10.1 | MIT | https://github.com/hyperium/hyper |
 | hyper-tls | 0.6.0 | MIT/Apache-2.0 | https://github.com/hyperium/hyper-tls |
 | hyper-util | 0.1.20 | MIT | https://github.com/hyperium/hyper-util |
@@ -318,8 +326,10 @@
 | r-efi | 5.3.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | https://github.com/r-efi/r-efi |
 | r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | https://github.com/r-efi/r-efi |
 | rand | 0.9.5 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
+| rand | 0.10.3 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
 | rand_chacha | 0.9.0 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
 | rand_core | 0.9.5 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 | https://github.com/rust-random/rand_core |
 | raw-window-handle | 0.6.2 | MIT OR Apache-2.0 OR Zlib | https://github.com/rust-windowing/raw-window-handle |
 | redox_syscall | 0.5.18 | MIT | https://gitlab.redox-os.org/redox-os/syscall |
 | redox_users | 0.5.2 | MIT | https://gitlab.redox-os.org/redox-os/users |
@@ -361,6 +371,7 @@
 | serialize-to-javascript | 0.1.2 | MIT OR Apache-2.0 | https://github.com/chippers/serialize-to-javascript |
 | serialize-to-javascript-impl | 0.1.2 | MIT OR Apache-2.0 | https://github.com/chippers/serialize-to-javascript |
 | servo_arc | 0.4.3 | MIT OR Apache-2.0 | https://github.com/servo/stylo |
+| sha1 | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | shlex | 2.0.1 | MIT OR Apache-2.0 | https://github.com/comex/rust-shlex |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 | https://github.com/vorner/signal-hook |
@@ -417,6 +428,7 @@
 | tokio | 1.52.3 | MIT | https://github.com/tokio-rs/tokio |
 | tokio-macros | 2.7.0 | MIT | https://github.com/tokio-rs/tokio |
 | tokio-native-tls | 0.3.1 | MIT | https://github.com/tokio-rs/tls |
+| tokio-tungstenite | 0.30.0 | MIT | https://github.com/snapview/tokio-tungstenite |
 | tokio-util | 0.7.18 | MIT | https://github.com/tokio-rs/tokio |
 | toml | 0.8.2 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml | 0.9.12+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
@@ -439,6 +451,7 @@
 | tray-icon | 0.24.1 | MIT OR Apache-2.0 | https://github.com/tauri-apps/tray-icon |
 | tree_magic_mini | 3.2.2 | MIT | https://github.com/mbrubeck/tree_magic/ |
 | try-lock | 0.2.5 | MIT | https://github.com/seanmonstar/try-lock |
+| tungstenite | 0.30.0 | MIT OR Apache-2.0 | https://github.com/snapview/tungstenite-rs |
 | typeid | 1.0.3 | MIT OR Apache-2.0 | https://github.com/dtolnay/typeid |
 | typenum | 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
 | uds_windows | 1.2.1 | MIT | https://github.com/haraldh/rust_uds_windows |

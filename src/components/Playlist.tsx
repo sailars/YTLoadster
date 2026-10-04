@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "../lib/api";
+import { NoticeCountdown, noticeDurationMs } from "./NoticeCountdown";
+import { localizedYoutubeAuthError } from "../lib/youtubeAuth";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import {
   aggregatePlaylistFormats,
@@ -63,11 +65,13 @@ type BatchDraft = {
 
 type Props = {
   url: string;
+  defaultDestinationDir?: string | null;
   sourceIsPlaylist: boolean;
   authSettings: BrowserAuthSettings;
   authenticated: boolean;
   includeVideoTechnicalDetailsInFilename: boolean;
   formatSelectionMode: PlaylistFormatSelectionMode;
+  showThumbnails?: boolean;
   jobs: Job[];
   finishedMediaSignatures: Set<string>;
   onUrlChange: (url: string) => void;
@@ -77,11 +81,13 @@ type Props = {
 
 export function Playlist({
   url,
+  defaultDestinationDir,
   sourceIsPlaylist,
   authSettings,
   authenticated,
   includeVideoTechnicalDetailsInFilename,
   formatSelectionMode,
+  showThumbnails = true,
   jobs,
   finishedMediaSignatures,
   onUrlChange,
@@ -110,7 +116,13 @@ export function Playlist({
     formatSelectionMode,
   });
   const [enqueueing, setEnqueueing] = useState(false);
-  const [enqueueResult, setEnqueueResult] = useState<{ added: number; skipped: number } | null>(null);
+  const [enqueueResult, setEnqueueResult] = useState<{ added: number; skipped: number; id: number } | null>(null);
+  const noticeSequence = useRef(0);
+  useEffect(() => {
+    if (!enqueueResult || enqueueResult.added === 0) return;
+    const timeout = window.setTimeout(() => setEnqueueResult(null), noticeDurationMs);
+    return () => window.clearTimeout(timeout);
+  }, [enqueueResult]);
   const [duplicateDraft, setDuplicateDraft] = useState<{ draft: BatchDraft; duplicates: HistoryDuplicate[] } | null>(null);
   const [warningDraft, setWarningDraft] = useState<BatchDraft | null>(null);
 
@@ -120,8 +132,13 @@ export function Playlist({
   const stopRef = useRef(false);
   const pendingIdsRef = useRef<string[]>([]);
   const analysisWorkersActiveRef = useRef(false);
+  const analysisSessionRef = useRef("");
+  const cancelledAnalysisSessionsRef = useRef<Set<string>>(new Set());
+  const analysisSequenceRef = useRef(0);
+  const analysisRequestSequenceRef = useRef(0);
   const authenticatedRef = useRef(authenticated);
   const fittedColumnLayoutsRef = useRef<Set<Layout>>(new Set());
+  const previousDefaultDestinationDir = useRef<string | null>(null);
 
   useEffect(() => {
     const previous = authSettingsRef.current;
@@ -164,10 +181,20 @@ export function Playlist({
   ]);
 
   useEffect(() => {
-    api.getDefaultDownloadDir()
-      .then((destinationDir) => setParams((current) => current.destinationDir ? current : { ...current, destinationDir }))
-      .catch(() => setParams((current) => current.destinationDir ? current : { ...current, destinationDir: "Downloads" }));
-  }, []);
+    if (defaultDestinationDir === undefined) {
+      api.getDefaultDownloadDir()
+        .then((destinationDir) => setParams((current) => current.destinationDir ? current : { ...current, destinationDir }))
+        .catch(() => setParams((current) => current.destinationDir ? current : { ...current, destinationDir: "Downloads" }));
+      return;
+    }
+    if (!defaultDestinationDir) return;
+    setParams((current) =>
+      !current.destinationDir || current.destinationDir === previousDefaultDestinationDir.current
+        ? { ...current, destinationDir: defaultDestinationDir }
+        : current,
+    );
+    previousDefaultDestinationDir.current = defaultDestinationDir;
+  }, [defaultDestinationDir]);
 
   useEffect(() => {
     const destination = params.destinationDir.trim();
@@ -237,9 +264,11 @@ export function Playlist({
     setLoadingPlaylist(true);
     setPlaylist(null);
     updateRows(() => []);
+    const analysisId = nextPlaylistAnalysisId();
+    analysisSessionRef.current = analysisId;
     const timer = window.setTimeout(async () => {
       try {
-        const info = await api.probePlaylist(currentUrl, makeCookieSource(authSettingsRef.current));
+        const info = await api.probePlaylist(currentUrl, makeCookieSource(authSettingsRef.current), analysisId);
         if (generation !== generationRef.current) return;
         setPlaylist(info);
         const initialRows = info.entries.map((entry) => ({
@@ -260,8 +289,11 @@ export function Playlist({
         } else {
           beginAnalysis(initialRows.map((row) => row.entry.id), generation);
         }
-      } catch {
-        if (generation === generationRef.current) setPlaylistError(t("playlist.loadError"));
+      } catch (error) {
+        if (generation === generationRef.current) {
+          setPlaylistError(localizedYoutubeAuthError(String(error), t)
+            ?? (isAnalysisTimeout(error) ? t("error.analysisTimeout") : t("playlist.loadError")));
+        }
       } finally {
         if (generation === generationRef.current) setLoadingPlaylist(false);
       }
@@ -270,8 +302,14 @@ export function Playlist({
     return () => {
       window.clearTimeout(timer);
       stopRef.current = true;
+      cancelledAnalysisSessionsRef.current.add(analysisId);
+      void api.cancelPlaylistAnalysis(analysisId).catch(() => undefined);
     };
   }, [sourceIsPlaylist, url]);
+
+  function nextPlaylistAnalysisId() {
+    return `playlist-${Date.now()}-${++analysisSequenceRef.current}`;
+  }
 
   const analyzedMedia = useMemo(
     () => rows.map((row) => row.media).filter((media): media is MediaInfo => Boolean(media)),
@@ -362,23 +400,41 @@ export function Playlist({
       || pendingIdsRef.current.length === 0
     ) return;
     analysisWorkersActiveRef.current = true;
-    void Promise.all([analysisWorker(generation), analysisWorker(generation)]).finally(() => {
-      analysisWorkersActiveRef.current = false;
-      if (
-        !stopRef.current
-        && pendingIdsRef.current.length > 0
-      ) {
-        launchAnalysisWorkers(generationRef.current);
-        return;
+    const analysisId = analysisSessionRef.current;
+    void (async () => {
+      try {
+        await api.beginPlaylistAnalysis(analysisId);
+        if (
+          generation !== generationRef.current
+          || analysisId !== analysisSessionRef.current
+          || stopRef.current
+        ) return;
+        await Promise.all([
+          analysisWorker(generation, analysisId),
+          analysisWorker(generation, analysisId),
+        ]);
+      } finally {
+        analysisWorkersActiveRef.current = false;
+        if (
+          !stopRef.current
+          && pendingIdsRef.current.length > 0
+        ) {
+          launchAnalysisWorkers(generationRef.current);
+          return;
+        }
+        if (generation !== generationRef.current || analysisId !== analysisSessionRef.current) return;
+        setAnalysisRunning(false);
+        if (stopRef.current && pendingIdsRef.current.length > 0) setAnalysisStopped(true);
       }
-      if (generation !== generationRef.current) return;
-      setAnalysisRunning(false);
-      if (stopRef.current && pendingIdsRef.current.length > 0) setAnalysisStopped(true);
-    });
+    })();
   }
 
-  async function analysisWorker(generation: number) {
-    while (generation === generationRef.current && !stopRef.current) {
+  async function analysisWorker(generation: number, analysisId: string) {
+    while (
+      generation === generationRef.current
+      && analysisId === analysisSessionRef.current
+      && !stopRef.current
+    ) {
       const entryId = pendingIdsRef.current.shift();
       if (!entryId) return;
       const row = rowsRef.current.find((candidate) => candidate.entry.id === entryId);
@@ -387,18 +443,41 @@ export function Playlist({
         ? { ...candidate, analysisState: "analyzing", issue: null, rejection: null }
         : candidate));
 
-      let result = await api.probePlaylistItem(entryId, row.entry.url, makeCookieSource(authSettingsRef.current));
+      const requestId = `item-${++analysisRequestSequenceRef.current}`;
+      let result = await api.probePlaylistItem(
+        entryId,
+        row.entry.url,
+        makeCookieSource(authSettingsRef.current),
+        analysisId,
+        requestId,
+      );
+      if (
+        generation !== generationRef.current
+        || analysisId !== analysisSessionRef.current
+        || cancelledAnalysisSessionsRef.current.has(analysisId)
+      ) return;
       if (
         generation === generationRef.current
         && !stopRef.current
+        && !isAnalysisTimeout(result.issue?.message)
         && (result.issue?.code === "network" || result.issue?.code === "forbidden")
       ) {
         await delay(900);
         if (generation === generationRef.current && !stopRef.current) {
-          result = await api.probePlaylistItem(entryId, row.entry.url, makeCookieSource(authSettingsRef.current));
+          result = await api.probePlaylistItem(
+            entryId,
+            row.entry.url,
+            makeCookieSource(authSettingsRef.current),
+            analysisId,
+            requestId,
+          );
         }
       }
-      if (generation !== generationRef.current) return;
+      if (
+        generation !== generationRef.current
+        || analysisId !== analysisSessionRef.current
+        || cancelledAnalysisSessionsRef.current.has(analysisId)
+      ) return;
       applyAnalysisResult(result);
       if (result.issue?.code === "rateLimited") {
         stopRef.current = true;
@@ -432,12 +511,22 @@ export function Playlist({
   function stopAnalysis() {
     stopRef.current = true;
     setAnalysisStopped(true);
+    setAnalysisRunning(false);
+    cancelledAnalysisSessionsRef.current.add(analysisSessionRef.current);
+    updateRows((current) => current.map((row) => row.analysisState === "analyzing"
+      ? { ...row, analysisState: "pending" }
+      : row));
+    if (analysisSessionRef.current) {
+      void api.cancelPlaylistAnalysis(analysisSessionRef.current).catch(() => undefined);
+    }
   }
 
   function resumeAnalysis() {
     const ids = rowsRef.current
       .filter((row) => row.analysisState === "pending" || row.analysisState === "temporaryError")
       .map((row) => row.entry.id);
+    pendingIdsRef.current = [];
+    analysisSessionRef.current = nextPlaylistAnalysisId();
     beginAnalysis(ids, generationRef.current);
   }
 
@@ -498,7 +587,7 @@ export function Playlist({
       warningCount: warnings,
     };
     if (!candidates.length) {
-      setEnqueueResult({ added: 0, skipped: selectedRows.length });
+      setEnqueueResult({ added: 0, skipped: selectedRows.length, id: ++noticeSequence.current });
       return;
     }
     setEnqueueing(true);
@@ -543,7 +632,7 @@ export function Playlist({
   async function executeBatch(draft: BatchDraft) {
     setWarningDraft(null);
     if (!draft.items.length) {
-      setEnqueueResult({ added: 0, skipped: draft.baselineSkipped });
+      setEnqueueResult({ added: 0, skipped: draft.baselineSkipped, id: ++noticeSequence.current });
       return;
     }
     setEnqueueing(true);
@@ -562,11 +651,12 @@ export function Playlist({
       }));
       onJobsCreated(result.queued.map((item) => item.job));
       setEnqueueResult({
+        id: ++noticeSequence.current,
         added: result.queued.length,
         skipped: draft.baselineSkipped + result.rejected.length,
       });
     } catch {
-      setEnqueueResult({ added: 0, skipped: draft.baselineSkipped + draft.items.length });
+      setEnqueueResult({ added: 0, skipped: draft.baselineSkipped + draft.items.length, id: ++noticeSequence.current });
     } finally {
       setEnqueueing(false);
     }
@@ -589,6 +679,7 @@ export function Playlist({
       onDestination={chooseDestination}
       onEnqueue={() => void prepareBatch()}
       onOpenQueue={onOpenQueue}
+      onDismissResult={() => setEnqueueResult(null)}
     />
   );
 
@@ -636,7 +727,7 @@ export function Playlist({
           {layout === "wide" ? (
             <div className="playlist-wide-layout">
               <div className="playlist-list-card">
-                <PlaylistHeader playlist={playlist} rows={rows} selected={selectedCount} selectedSize={selectedSizeText} diskSpace={diskSpaceText} matchSummary={matchSummary} layout={layout} onLayout={() => setLayout("stacked")} />
+                <PlaylistHeader playlist={playlist} rows={rows} selected={selectedCount} selectedSize={selectedSizeText} diskSpace={diskSpaceText} matchSummary={matchSummary} layout={layout} showThumbnails={showThumbnails} onLayout={() => setLayout("stacked")} />
                 <PlaylistAnalysisBar
                   analyzed={analyzedCount}
                   total={rows.length}
@@ -654,6 +745,7 @@ export function Playlist({
                   resizable
                   autoFit={!fittedColumnLayoutsRef.current.has(layout)}
                   locale={locale}
+                  showThumbnails={showThumbnails}
                   onInitialFit={fitColumns}
                   onResize={resizeColumns}
                   onToggle={toggleRow}
@@ -666,7 +758,7 @@ export function Playlist({
           ) : (
             <div className="playlist-stacked-layout">
               <div className="playlist-list-card">
-                <PlaylistHeader playlist={playlist} rows={rows} selected={selectedCount} selectedSize={selectedSizeText} diskSpace={diskSpaceText} matchSummary={matchSummary} layout={layout} onLayout={() => setLayout("wide")} />
+                <PlaylistHeader playlist={playlist} rows={rows} selected={selectedCount} selectedSize={selectedSizeText} diskSpace={diskSpaceText} matchSummary={matchSummary} layout={layout} showThumbnails={showThumbnails} onLayout={() => setLayout("wide")} />
                 <PlaylistAnalysisBar
                   analyzed={analyzedCount}
                   total={rows.length}
@@ -685,6 +777,7 @@ export function Playlist({
                   compact
                   autoFit={!fittedColumnLayoutsRef.current.has(layout)}
                   locale={locale}
+                  showThumbnails={showThumbnails}
                   onInitialFit={fitColumns}
                   onResize={resizeColumns}
                   onToggle={toggleRow}
@@ -741,18 +834,18 @@ export function Playlist({
   );
 }
 
-function PlaylistHeader({ playlist, rows, selected, selectedSize, diskSpace, matchSummary, layout, onLayout }: { playlist: PlaylistInfo; rows: PlaylistRow[]; selected: number; selectedSize: string; diskSpace: string; matchSummary: string | null; layout: Layout; onLayout: () => void }) {
+function PlaylistHeader({ playlist, rows, selected, selectedSize, diskSpace, matchSummary, layout, showThumbnails, onLayout }: { playlist: PlaylistInfo; rows: PlaylistRow[]; selected: number; selectedSize: string; diskSpace: string; matchSummary: string | null; layout: Layout; showThumbnails: boolean; onLayout: () => void }) {
   const { t } = useI18n();
   const fallbackThumbnail = rows.find((row) => row.media?.thumbnail || row.entry.thumbnail);
   return (
     <div className="playlist-header-card">
-      <MediaThumbnail
+      {showThumbnails ? <MediaThumbnail
         src={playlist.thumbnail ?? fallbackThumbnail?.media?.thumbnail ?? fallbackThumbnail?.entry.thumbnail}
         mediaUrl={fallbackThumbnail?.entry.url}
         alt={playlist.title}
         className="playlist-cover"
         placeholderClassName="playlist-cover-placeholder"
-      />
+      /> : null}
       <div className="playlist-header-copy">
         <strong title={playlist.title}>{playlist.title}</strong>
         {playlist.uploader ? <span>{playlist.uploader}</span> : null}
@@ -793,6 +886,7 @@ function PlaylistTable({
   autoFit = false,
   compact = false,
   locale,
+  showThumbnails,
   onInitialFit,
   onResize,
   onToggle,
@@ -808,6 +902,7 @@ function PlaylistTable({
   autoFit?: boolean;
   compact?: boolean;
   locale: "ru" | "en";
+  showThumbnails: boolean;
   onInitialFit?: (widths: PlaylistColumnWidths) => void;
   onResize: (widths: PlaylistColumnWidths) => void;
   onToggle: (id: string) => void;
@@ -1003,13 +1098,13 @@ function PlaylistTable({
               >
                 <span className="playlist-checkbox-cell"><Checkbox checked={row.selected} disabled={disabled} /></span>
                 <div className="playlist-row-title">
-                  <MediaThumbnail
+                  {showThumbnails ? <MediaThumbnail
                     src={row.entry.thumbnail ?? row.media?.thumbnail}
                     mediaUrl={row.media?.webpageUrl ?? row.entry.url}
                     alt={row.entry.title}
                     className="playlist-row-thumbnail"
                     placeholderClassName="playlist-row-thumb-placeholder"
-                  />
+                  /> : null}
                   <span><strong title={row.entry.title}>{row.entry.title}</strong><small>{row.entry.index}</small></span>
                 </div>
                 <span className="playlist-cell-muted">{row.entry.duration ? formatDuration(row.entry.duration) : "-"}</span>
@@ -1040,6 +1135,7 @@ function PlaylistParametersPanel({
   onDestination,
   onEnqueue,
   onOpenQueue,
+  onDismissResult,
 }: {
   params: PlaylistParameters;
   setParams: React.Dispatch<React.SetStateAction<PlaylistParameters>>;
@@ -1051,11 +1147,12 @@ function PlaylistParametersPanel({
   readyForBatch: boolean;
   selectedAnalysisPending: boolean;
   enqueueing: boolean;
-  enqueueResult: { added: number; skipped: number } | null;
+  enqueueResult: { added: number; skipped: number; id: number } | null;
   onModeChange: (mode: PlaylistDownloadMode) => void;
   onDestination: () => void;
   onEnqueue: () => void;
   onOpenQueue: () => void;
+  onDismissResult: () => void;
 }) {
   const { locale, t } = useI18n();
   const [videoAdvancedOpen, setVideoAdvancedOpen] = useState(false);
@@ -1094,18 +1191,19 @@ function PlaylistParametersPanel({
     <div className={`playlist-parameters${dense ? " dense" : ""}`}>
       <div className="playlist-parameter-controls">
         <DownloadModeTabs mode={params.mode} onChange={onModeChange} />
+        <h3 className="download-parameters-heading">{t("playlist.parameters")}</h3>
 
         {params.mode === "video" ? (
         <div className="options-stack playlist-options-stack">
           <section className="video-profile-select" aria-label={t("video.profile")}>
-            <LabeledParameter label={t("video.profile")}><ParameterSelect label={t("video.profile")} value={params.videoProfile} options={profileOptions} selectedOption={params.videoProfile === "custom" ? { value: "custom", label: t("video.custom"), description: t("video.customDescription") } : undefined} onChange={(value) => setParams((current) => ({
+            <div className="playlist-param playlist-profile-field"><ParameterSelect label={t("video.profile")} value={params.videoProfile} options={profileOptions} selectedOption={params.videoProfile === "custom" ? { value: "custom", label: t("video.custom"), description: t("video.customDescription") } : undefined} onChange={(value) => setParams((current) => ({
               ...current,
               videoProfile: value as VideoDownloadProfile,
               resolution: "best",
               fps: null,
               container: null,
               codec: null,
-            }))} /></LabeledParameter>
+            }))} /></div>
           </section>
           <section className="advanced-settings video-advanced-settings playlist-advanced-settings" aria-label={t("video.advancedLabel")}>
             <button type="button" className="settings-title" aria-expanded={videoAdvancedOpen} aria-controls="playlist-video-advanced" onClick={() => setVideoAdvancedOpen((open) => !open)}>
@@ -1192,8 +1290,20 @@ function PlaylistParametersPanel({
         {selectedAnalysisPending ? <small className="playlist-readiness-note">{t("playlist.waitSelectedAnalysis")}</small> : null}
         {enqueueResult ? (
           <div className={`playlist-batch-feedback${enqueueResult.skipped > 0 ? " has-skips" : " all-added"}`} role={enqueueResult.skipped > 0 ? "alert" : "status"}>
+            {enqueueResult.added > 0 ? <NoticeCountdown key={enqueueResult.id} /> : null}
             <div><strong>{enqueueResult.skipped > 0 ? t("playlist.batchPartialTitle") : t("playlist.batchResultTitle")}</strong><span>{t("playlist.batchResult", enqueueResult)}</span></div>
             <button type="button" className="secondary" onClick={onOpenQueue}>{t("playlist.openQueue")}</button>
+            <button
+              type="button"
+              className="notice-dismiss"
+              onClick={onDismissResult}
+              aria-label={t("playlist.dismissBatchResult")}
+              title={t("playlist.dismissBatchResult")}
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path d="M4 4l8 8M12 4l-8 8" />
+              </svg>
+            </button>
           </div>
         ) : null}
       </section>
@@ -1273,7 +1383,12 @@ function visibleRowStatus(
 function rowDetail(row: PlaylistRow, resolved: ResolvedPlaylistItem | null | undefined, job: Job | null | undefined, t: ReturnType<typeof useI18n>["t"]) {
   if (job?.error) return detailText(t("playlist.downloadErrorDetail"));
   if (!job && row.rejection) return detailText(duplicateRejectionLabel(row.rejection, t));
-  if (row.issue) return detailText(t(`playlist.issue.${row.issue.code}` as TranslationKey));
+  if (row.issue) {
+    const authError = localizedYoutubeAuthError(row.issue.message, t);
+    if (authError) return detailText(authError);
+    if (isAnalysisTimeout(row.issue.message)) return detailText(t("error.analysisTimeout"));
+    return detailText(t(`playlist.issue.${row.issue.code}` as TranslationKey));
+  }
   if (resolved && !resolved.available && resolved.reason) return detailText(t(`playlist.reason.${resolved.reason}` as TranslationKey));
   if (resolved?.warnings.length) {
     const replacements = resolved.replacements?.map((replacement) =>
@@ -1387,8 +1502,12 @@ function delay(milliseconds: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
+function isAnalysisTimeout(error: unknown) {
+  return String(error).toLowerCase().includes("analysis-error:timeout");
+}
+
 function Checkbox({ checked, disabled = false }: { checked: boolean; disabled?: boolean }) {
-  return <span className="playlist-checkbox" data-checked={checked || undefined} data-disabled={disabled || undefined}>{checked ? "✓" : ""}</span>;
+  return <span className="playlist-checkbox" data-checked={checked || undefined} data-disabled={disabled || undefined} aria-hidden="true" />;
 }
 
 function StackedLayoutIcon() {

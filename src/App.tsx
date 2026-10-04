@@ -35,6 +35,8 @@ import type {
   YoutubeAuthStart,
   YoutubeAuthStatus,
   UpdateCheckState,
+  ComponentId,
+  ComponentUpdateCheckState,
 } from "./lib/types";
 import {
   dismissUpdateNotice,
@@ -46,15 +48,11 @@ import {
   saveAutomaticUpdateChecksEnabled,
   updateStateFromResult,
 } from "./lib/updates";
-import {
-  closeYoutubeAuthBrowser,
-  hasAuthenticatedYoutubeCookies,
-  readYoutubeAuthCookies,
-} from "./lib/youtubeAuth";
+import { localizedYoutubeAuthError } from "./lib/youtubeAuth";
 import { getInitialBrowserAuthSettings, saveBrowserAuthSettings } from "./lib/browserAuth";
 
 type ThemeTransitionDocument = Document & {
-  startViewTransition?: (update: () => void) => unknown;
+  startViewTransition?: (update: () => void) => { finished: Promise<void> };
 };
 
 const themeTransitionDuration = "1600ms";
@@ -115,7 +113,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   const [finishedMediaSignatures, setFinishedMediaSignatures] = useState<Set<string>>(() => new Set());
   const [repeatDraft, setRepeatDraft] = useState<{ id: string; request?: HistoryItem["request"] } | null>(null);
   const [historyWriteFailurePath, setHistoryWriteFailurePath] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [defaultDestinationDir, setDefaultDestinationDir] = useState<string | null>(null);
   const [platform, setPlatform] = useState("unknown");
   const [theme, setTheme] = useState<ThemePreference>(getInitialTheme);
   const [notificationsEnabled, setNotificationsEnabled] = useState(getInitialNotificationsEnabled);
@@ -127,6 +125,12 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     const cached = loadCachedUpdateCheck(packageMetadata.version);
     return cached ? updateStateFromResult(cached) : { status: "idle" };
   });
+  const [componentUpdates, setComponentUpdates] = useState<ComponentUpdateCheckState>({
+    status: "idle",
+    results: [],
+    installingId: null,
+    installErrorId: null,
+  });
   const [updateNoticeDismissed, setUpdateNoticeDismissed] = useState(() => {
     const cached = loadCachedUpdateCheck(packageMetadata.version);
     return Boolean(
@@ -134,22 +138,36 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     );
   });
   const youtubeAuthPollTimer = useRef<number | null>(null);
+  const youtubeAuthAttempt = useRef(0);
   const automaticUpdateCheckStarted = useRef(false);
   const notificationsEnabledRef = useRef(notificationsEnabled);
+  const notificationChangePending = useRef(false);
+  const notificationPreferenceVersion = useRef(0);
+  const themeTransitionId = useRef(0);
   const localeRef = useRef(locale);
   const notifiedJobs = useRef(new Set<number>());
   const [appSettings, setAppSettings] = useState<AppSettings>({
     concurrency: 2,
     fragmentConcurrency: 1,
-    downloadRetries: 10,
+    downloadRetries: 3,
     fileAccessRetries: 3,
-    fragmentRetries: 10,
+    fragmentRetries: 3,
     customUserAgentEnabled: false,
     customUserAgent: "",
     includeVideoTechnicalDetailsInFilename: false,
+    filenameTemplate: "title",
+    filenameCollisionPolicy: "rename",
     playlistFormatSelectionMode: "strict",
     preventSystemSleepWhileDownloading: false,
     minimizeToTray: true,
+    completionSoundEnabled: notificationsEnabled,
+    showThumbnails: true,
+    accentColor: "blue",
+    proxyMode: "system",
+    proxyHost: "",
+    proxyPort: 0,
+    proxyUsername: "",
+    proxyPasswordSet: false,
   });
   const [authSettings, setAuthSettings] = useState<BrowserAuthSettings>(getInitialBrowserAuthSettings);
   const [youtubeAuthStatus, setYoutubeAuthStatus] = useState<YoutubeAuthStatus>({
@@ -177,20 +195,33 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
       .catch(() => setPlatform("unknown"));
     api
       .getSettings()
-      .then(setAppSettings)
+      .then((settings) => setAppSettings({ ...settings, completionSoundEnabled: notificationsEnabledRef.current }))
       .catch(() => setAppSettings({
         concurrency: 2,
         fragmentConcurrency: 1,
-        downloadRetries: 10,
+        downloadRetries: 3,
         fileAccessRetries: 3,
-        fragmentRetries: 10,
+        fragmentRetries: 3,
         customUserAgentEnabled: false,
         customUserAgent: "",
         includeVideoTechnicalDetailsInFilename: false,
+        filenameTemplate: "title",
+        filenameCollisionPolicy: "rename",
         playlistFormatSelectionMode: "strict",
         preventSystemSleepWhileDownloading: false,
         minimizeToTray: true,
+        completionSoundEnabled: notificationsEnabledRef.current,
+        showThumbnails: true,
+        accentColor: "blue",
+        proxyMode: "system",
+        proxyHost: "",
+        proxyPort: 0,
+        proxyUsername: "",
+        proxyPasswordSet: false,
       }));
+    api.getDefaultDownloadDir()
+      .then(setDefaultDestinationDir)
+      .catch(() => setDefaultDestinationDir("Downloads"));
     api
       .getYoutubeAuthStatus()
       .then((status) => {
@@ -215,16 +246,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
       setJobs((current) => updatedJob.state === "Completed"
         ? current.filter((job) => job.id !== updatedJob.id)
         : upsertJob(current, updatedJob));
-      if (updatedJob.state === "Completed" && notificationsEnabledRef.current && !notifiedJobs.current.has(updatedJob.id)) {
-        notifiedJobs.current.add(updatedJob.id);
-        void showDownloadCompletedNotification(updatedJob.request.title, localeRef.current).then((shown) => {
-          if (!shown) {
-            notificationsEnabledRef.current = false;
-            saveNotificationsEnabled(false);
-            setNotificationsEnabled(false);
-          }
-        });
-      }
+      if (updatedJob.state === "Completed") notifyDownloadCompleted(updatedJob);
     });
     const unlistenFinished = api.onDownloadFinished((event) => {
       setJobs((current) => current.filter((job) => job.id !== event.job.id));
@@ -236,19 +258,11 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
         setHistory((current) => [event.history!, ...current.filter((item) => item.id !== event.history!.id)]);
       }
       if (event.historyError) setHistoryWriteFailurePath(event.outputPath);
-      if (notificationsEnabledRef.current && !notifiedJobs.current.has(event.job.id)) {
-        notifiedJobs.current.add(event.job.id);
-        void showDownloadCompletedNotification(event.job.request.title, localeRef.current).then((shown) => {
-          if (!shown) {
-            notificationsEnabledRef.current = false;
-            saveNotificationsEnabled(false);
-            setNotificationsEnabled(false);
-          }
-        });
-      }
+      notifyDownloadCompleted(event.job);
     });
 
     return () => {
+      youtubeAuthAttempt.current += 1;
       if (youtubeAuthPollTimer.current !== null) {
         window.clearTimeout(youtubeAuthPollTimer.current);
       }
@@ -271,6 +285,27 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     }
   }
 
+  async function checkComponentUpdates() {
+    setComponentUpdates((current) => ({ ...current, status: "checking", installErrorId: null }));
+    try {
+      const results = await api.checkComponentUpdates();
+      setComponentUpdates((current) => ({ ...current, status: "ready", results }));
+    } catch {
+      setComponentUpdates((current) => ({ ...current, status: "error" }));
+    }
+  }
+
+  async function installComponentUpdate(id: ComponentId) {
+    setComponentUpdates((current) => ({ ...current, installingId: id, installErrorId: null }));
+    try {
+      await api.installComponentUpdate(id);
+      const results = await api.checkComponentUpdates();
+      setComponentUpdates((current) => ({ ...current, status: "ready", results, installingId: null }));
+    } catch {
+      setComponentUpdates((current) => ({ ...current, installingId: null, installErrorId: id }));
+    }
+  }
+
   function changeAutomaticUpdateChecks(enabled: boolean) {
     saveAutomaticUpdateChecksEnabled(enabled);
     setAutomaticUpdateChecksEnabled(enabled);
@@ -286,8 +321,8 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   }, [locale]);
 
   useEffect(() => {
-    notificationsEnabledRef.current = notificationsEnabled;
-  }, [notificationsEnabled]);
+    document.documentElement.dataset.accent = appSettings.accentColor;
+  }, [appSettings.accentColor]);
 
   useEffect(() => {
     applyTheme(theme);
@@ -325,27 +360,50 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     root.style.setProperty("--tt-y", `${cy}px`);
     root.style.setProperty("--tt-r", `${radius}px`);
     root.style.setProperty("--tt-dur", themeTransitionDuration);
-
-    transitionDocument.startViewTransition(commitTheme);
+    root.classList.remove("theme-transition-interactive");
+    const transitionId = ++themeTransitionId.current;
+    const transition = transitionDocument.startViewTransition(commitTheme);
+    const unlockTimer = window.setTimeout(() => {
+      if (themeTransitionId.current === transitionId) {
+        root.classList.add("theme-transition-interactive");
+      }
+    }, 1000);
+    const finish = () => {
+      window.clearTimeout(unlockTimer);
+      if (themeTransitionId.current === transitionId) {
+        root.classList.remove("theme-transition-interactive");
+      }
+    };
+    void transition.finished.then(finish, finish);
   }
 
-  const toggleTheme = (event: MouseEvent<HTMLButtonElement>) => {
-    const nextTheme = nextThemePreference(theme);
-
+  const changeTheme = (nextTheme: ThemePreference, trigger: HTMLElement | null) => {
     const commitTheme = () => {
       applyTheme(nextTheme);
       saveTheme(nextTheme);
       flushSync(() => setTheme(nextTheme));
     };
+    startThemeTransition(commitTheme, trigger);
+  };
 
-    startThemeTransition(commitTheme, event.currentTarget);
+  const toggleTheme = (event: MouseEvent<HTMLButtonElement>) => {
+    changeTheme(nextThemePreference(theme), event.currentTarget);
   };
 
   const updateAppSettings = (patch: SettingsPatch) => {
-    void api
+    if (patch.completionSoundEnabled !== undefined) {
+      return changeNotifications(patch.completionSoundEnabled);
+    }
+    return api
       .updateSettings(patch)
-      .then(setAppSettings)
-      .catch(() => undefined);
+      .then((settings) => {
+        setAppSettings({ ...settings, completionSoundEnabled: notificationsEnabledRef.current });
+        if (patch.defaultDownloadDir !== undefined) {
+          setDefaultDestinationDir(settings.defaultDownloadDir ?? "Downloads");
+        }
+        return true;
+      })
+      .catch(() => false);
   };
 
   const updateBrowserAuthSettings = (nextSettings: BrowserAuthSettings) => {
@@ -369,89 +427,86 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     });
   };
 
-  async function finishYoutubeAuthCapture(browser: string) {
-    setYoutubeAuthPhase("capturing");
-    setYoutubeAuthError(null);
-    let websocketUrl: string | null = null;
-    try {
-      const capture = await api.prepareYoutubeAuthCapture();
-      websocketUrl = capture.websocketUrl ?? null;
-      if (!websocketUrl) throw new Error(t("settings.youtubeAuthFailed"));
-      const cookies = await readYoutubeAuthCookies(websocketUrl);
-      if (!hasAuthenticatedYoutubeCookies(cookies)) {
-        await closeYoutubeAuthBrowser(websocketUrl);
-        const status = await api.cancelYoutubeAuth();
-        setYoutubeAuthStatus(status);
-        setYoutubeAuthPhase("error");
-        setYoutubeAuthError(t("settings.youtubeAuthCancelled"));
-        return;
-      }
-
-      await closeYoutubeAuthBrowser(websocketUrl);
-      const status = await api.completeYoutubeAuth(browser, cookies);
-      setYoutubeAuthStatus(status);
-      setYoutubeAuthBrowser(status.browser ?? browser);
-      setYoutubeAuthPhase("success");
-      setYoutubeAuthError(null);
-      setYoutubeSessionUsage(true);
-    } catch (error) {
-      if (websocketUrl) await closeYoutubeAuthBrowser(websocketUrl);
-      const status = await api.cancelYoutubeAuth().catch(() => null);
-      if (status) setYoutubeAuthStatus(status);
-      setYoutubeAuthPhase("error");
-      setYoutubeAuthError(String(error));
+  const stopYoutubeAuthPolling = () => {
+    youtubeAuthAttempt.current += 1;
+    if (youtubeAuthPollTimer.current !== null) {
+      window.clearTimeout(youtubeAuthPollTimer.current);
+      youtubeAuthPollTimer.current = null;
     }
-  }
+  };
 
   const scheduleYoutubeAuthPoll = (browser: string, startedAt: number) => {
+    const attempt = youtubeAuthAttempt.current;
+    let everAuthenticated = false;
+    let lastAuthenticated = false;
+    let consecutiveErrors = 0;
+    const isCurrent = () => youtubeAuthAttempt.current === attempt;
     const poll = async () => {
-      if (Date.now() - startedAt > 3 * 60_000) {
+      if (!isCurrent()) return;
+      try {
+        const state = await api.getYoutubeAuthWindowState();
+        if (!isCurrent()) return;
+        consecutiveErrors = 0;
+        setYoutubeAuthStatus(state.status);
+        setYoutubeAuthError(null);
+        if (state.sessionDetected) {
+          everAuthenticated = true;
+          setYoutubeAuthBrowser(state.status.browser ?? browser);
+          setYoutubeAuthPhase("success");
+          if (!lastAuthenticated) setYoutubeSessionUsage(true);
+        } else if (state.open) {
+          setYoutubeAuthPhase("waiting");
+          if (lastAuthenticated) setYoutubeSessionUsage(false);
+        }
+        lastAuthenticated = state.sessionDetected;
+        if (!state.open) {
+          youtubeAuthPollTimer.current = null;
+          if (everAuthenticated && state.status.authenticated) {
+            setYoutubeAuthPhase("success");
+          } else {
+            setYoutubeAuthPhase("error");
+            setYoutubeAuthError(t("settings.youtubeAuthCancelled"));
+          }
+          return;
+        }
+      } catch (error) {
+        if (!isCurrent()) return;
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= 3) {
+          setYoutubeAuthPhase("error");
+          setYoutubeAuthError(localizedYoutubeAuthError(String(error), t) ?? String(error));
+        }
+      }
+      if (!everAuthenticated && Date.now() - startedAt > 3 * 60_000) {
         youtubeAuthPollTimer.current = null;
         const status = await api.cancelYoutubeAuth().catch(() => null);
+        if (!isCurrent()) return;
         if (status) setYoutubeAuthStatus(status);
         setYoutubeAuthPhase("error");
         setYoutubeAuthError(t("settings.youtubeAuthTimeout"));
         return;
       }
-      try {
-        const windowState = await api.getYoutubeAuthWindowState();
-        if (windowState.sessionDetected) {
-          setYoutubeAuthPhase("finishing");
-          setYoutubeAuthError(null);
-        }
-        if (!windowState.open) {
-          youtubeAuthPollTimer.current = null;
-          await finishYoutubeAuthCapture(browser);
-          return;
-        }
-      } catch {
-        youtubeAuthPollTimer.current = null;
-        const status = await api.cancelYoutubeAuth().catch(() => null);
-        if (status) setYoutubeAuthStatus(status);
-        setYoutubeAuthPhase("error");
-        setYoutubeAuthError(t("settings.youtubeAuthCancelled"));
-        return;
-      }
-      youtubeAuthPollTimer.current = window.setTimeout(poll, 1_500);
+      if (isCurrent()) youtubeAuthPollTimer.current = window.setTimeout(poll, 500);
     };
     youtubeAuthPollTimer.current = window.setTimeout(poll, 500);
   };
 
   const startYoutubeLogin = async () => {
-    if (youtubeAuthPollTimer.current !== null) {
-      window.clearTimeout(youtubeAuthPollTimer.current);
-      youtubeAuthPollTimer.current = null;
-    }
+    stopYoutubeAuthPolling();
+    const attempt = youtubeAuthAttempt.current;
     setYoutubeAuthPhase("opening");
     setYoutubeAuthError(null);
     try {
       const session = await api.startYoutubeAuth(authSettings.browser);
+      if (youtubeAuthAttempt.current !== attempt) return;
       setYoutubeAuthBrowser(session.browser);
       setYoutubeAuthPhase("waiting");
       scheduleYoutubeAuthPoll(session.browser, Date.now());
     } catch (error) {
+      if (youtubeAuthAttempt.current !== attempt) return;
       setYoutubeAuthPhase("error");
-      setYoutubeAuthError(String(error));
+      const message = String(error);
+      setYoutubeAuthError(localizedYoutubeAuthError(message, t) ?? message);
     }
   };
 
@@ -505,10 +560,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   };
 
   const startYoutubeWebviewLogin = async () => {
-    if (youtubeAuthPollTimer.current !== null) {
-      window.clearTimeout(youtubeAuthPollTimer.current);
-      youtubeAuthPollTimer.current = null;
-    }
+    stopYoutubeAuthPolling();
     setYoutubeAuthPhase("opening");
     setYoutubeAuthError(null);
     try {
@@ -523,6 +575,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   };
 
   const signOutYoutube = async () => {
+    stopYoutubeAuthPolling();
     try {
       const status = await api.signOutYoutube();
       setYoutubeAuthStatus(status);
@@ -537,10 +590,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   };
 
   const clearYoutubeAuth = async () => {
-    if (youtubeAuthPollTimer.current !== null) {
-      window.clearTimeout(youtubeAuthPollTimer.current);
-      youtubeAuthPollTimer.current = null;
-    }
+    stopYoutubeAuthPolling();
     try {
       const status = await api.clearYoutubeAuth();
       setYoutubeAuthStatus(status);
@@ -554,26 +604,60 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     }
   };
 
-  const toggleNotifications = async () => {
-    if (notificationsEnabled) {
-      saveNotificationsEnabled(false);
-      setNotificationsEnabled(false);
-      return;
-    }
+  function applyNotificationsEnabled(enabled: boolean) {
+    notificationPreferenceVersion.current += 1;
+    notificationsEnabledRef.current = enabled;
+    saveNotificationsEnabled(enabled);
+    setNotificationsEnabled(enabled);
+    setAppSettings((current) => ({ ...current, completionSoundEnabled: enabled }));
+  }
 
+  function persistCompletionPreference(enabled: boolean) {
+    return api.updateSettings({ completionSoundEnabled: enabled }).then((settings) => {
+      setAppSettings({ ...settings, completionSoundEnabled: notificationsEnabledRef.current });
+    }).catch(() => undefined);
+  }
+
+  function notifyDownloadCompleted(job: Job) {
+    if (!notificationsEnabledRef.current || notifiedJobs.current.has(job.id)) return;
+    notifiedJobs.current.add(job.id);
+    const preferenceVersion = notificationPreferenceVersion.current;
+    void showDownloadCompletedNotification(job.request.title, localeRef.current).then((shown) => {
+      if (preferenceVersion !== notificationPreferenceVersion.current || !notificationsEnabledRef.current) return;
+      if (!shown) {
+        applyNotificationsEnabled(false);
+        void persistCompletionPreference(false);
+        return;
+      }
+    });
+  }
+
+  async function changeNotifications(requestedEnabled: boolean): Promise<boolean> {
+    if (notificationChangePending.current) return false;
+    notificationChangePending.current = true;
     setNotificationPermissionPending(true);
     try {
+      if (!requestedEnabled) {
+        applyNotificationsEnabled(false);
+        await persistCompletionPreference(false);
+        return true;
+      }
       const granted = await requestNotificationAccess();
-      const enabled = granted && await showNotificationsEnabledNotification(locale);
-      saveNotificationsEnabled(enabled);
-      setNotificationsEnabled(enabled);
+      const enabled = granted && await showNotificationsEnabledNotification(localeRef.current);
+      applyNotificationsEnabled(enabled);
+      await persistCompletionPreference(enabled);
+      return enabled;
     } catch {
-      saveNotificationsEnabled(false);
-      setNotificationsEnabled(false);
+      applyNotificationsEnabled(false);
+      await persistCompletionPreference(false);
+      return false;
     } finally {
+      notificationChangePending.current = false;
       setNotificationPermissionPending(false);
     }
-  };
+  }
+
+  const toggleNotifications = () => changeNotifications(!notificationsEnabledRef.current);
 
   const playlistSourceKind = classifyYoutubeSource(playlistUrl);
   const newDownloadSourceKind = classifyYoutubeSource(newDownloadUrl);
@@ -671,7 +755,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             onSectionChange={setSection}
             onNotifications={() => void toggleNotifications()}
             onTheme={toggleTheme}
-            onSettings={() => setSettingsOpen(true)}
+            onSettings={() => setSection("settings")}
           />
           <div className="application-content">
             {updateCheck.status === "available" && updateCheck.result && automaticUpdateChecksEnabled && !updateNoticeDismissed ? (
@@ -687,6 +771,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             <div className="app-section-host" hidden={section !== "new"}>
               <Downloader
                 authSettings={authSettings}
+                defaultDestinationDir={defaultDestinationDir}
                 includeVideoTechnicalDetailsInFilename={appSettings.includeVideoTechnicalDetailsInFilename}
                 url={newDownloadUrl}
                 sourceIsVideo={sourceIsVideo}
@@ -700,11 +785,13 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             <div className="app-section-host" hidden={section !== "playlist"}>
               <Playlist
                 url={playlistUrl}
+                defaultDestinationDir={defaultDestinationDir}
                 sourceIsPlaylist={sourceIsPlaylist}
                 authSettings={authSettings}
                 authenticated={youtubeAuthStatus.authenticated}
                 includeVideoTechnicalDetailsInFilename={appSettings.includeVideoTechnicalDetailsInFilename}
                 formatSelectionMode={appSettings.playlistFormatSelectionMode}
+                showThumbnails={appSettings.showThumbnails}
                 jobs={jobs}
                 finishedMediaSignatures={finishedMediaSignatures}
                 onUrlChange={changePlaylistUrl}
@@ -715,6 +802,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             {section === "queue" ? (
               <Queue
                 jobs={jobs}
+                showThumbnails={appSettings.showThumbnails}
                 onCancel={(id) => { void api.cancelJob(id).then(refreshJobs); }}
                 onPause={(id) => { void api.pauseJob(id).then(refreshJobs); }}
                 onResume={(id) => { void api.resumeJob(id).then(refreshJobs); }}
@@ -730,43 +818,49 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             {section === "history" ? (
               <History
                 items={history}
+                showThumbnails={appSettings.showThumbnails}
                 onOpenFolder={(path) => { void api.openDownloadFolder(path); }}
                 onRepeat={repeatHistoryItem}
                 onRemove={async (id) => { await api.removeHistoryItem(id); setHistory((current) => current.filter((item) => item.id !== id)); }}
                 onClear={async () => { await api.clearHistory(); setHistory([]); }}
               />
             ) : null}
+            {section === "settings" ? (
+              <SettingsPanel
+                isOpen
+                settings={authSettings}
+                downloadSettings={appSettings}
+                notificationPending={notificationPermissionPending}
+                platform={platform}
+                locale={locale}
+                theme={theme}
+                defaultDestinationDir={defaultDestinationDir}
+                onThemeChange={changeTheme}
+                youtubeAuthStatus={youtubeAuthStatus}
+                youtubeAuthPhase={youtubeAuthPhase}
+                youtubeAuthBrowser={youtubeAuthBrowser}
+                youtubeAuthError={youtubeAuthError}
+                updateCheck={updateCheck}
+                componentUpdates={componentUpdates}
+                automaticUpdateChecksEnabled={automaticUpdateChecksEnabled}
+                onChange={updateBrowserAuthSettings}
+                onYoutubeLogin={() => void startYoutubeLogin()}
+                onYoutubeWebviewLogin={() => void startYoutubeWebviewLogin()}
+                onYoutubeLogout={() => void signOutYoutube()}
+                onYoutubeClear={() => void clearYoutubeAuth()}
+                onCheckForUpdates={() => void checkForUpdates()}
+                onCheckComponentUpdates={() => void checkComponentUpdates()}
+                onInstallComponentUpdate={(id) => void installComponentUpdate(id)}
+                onAutomaticUpdateChecksChange={changeAutomaticUpdateChecks}
+                onDownloadSettingsChange={updateAppSettings}
+                onLocaleChange={onLocaleChange}
+                onOpenExternalUrl={(url) => { void api.openExternalUrl(url).catch(() => undefined); }}
+                onClose={() => setSection("new")}
+              />
+            ) : null}
           </div>
         </div>
       </section>
-      <SettingsPanel
-        isOpen={settingsOpen}
-        settings={authSettings}
-        downloadSettings={appSettings}
-        platform={platform}
-        locale={locale}
-        youtubeAuthStatus={youtubeAuthStatus}
-        youtubeAuthPhase={youtubeAuthPhase}
-        youtubeAuthBrowser={youtubeAuthBrowser}
-        youtubeAuthError={youtubeAuthError}
-        updateCheck={updateCheck}
-        automaticUpdateChecksEnabled={automaticUpdateChecksEnabled}
-        onChange={(nextSettings) =>
-          updateBrowserAuthSettings(nextSettings)
-        }
-        onYoutubeLogin={() => void startYoutubeLogin()}
-        onYoutubeWebviewLogin={() => void startYoutubeWebviewLogin()}
-        onYoutubeLogout={() => void signOutYoutube()}
-        onYoutubeClear={() => void clearYoutubeAuth()}
-        onCheckForUpdates={() => void checkForUpdates()}
-        onAutomaticUpdateChecksChange={changeAutomaticUpdateChecks}
-        onDownloadSettingsChange={updateAppSettings}
-        onLocaleChange={onLocaleChange}
-        onOpenExternalUrl={(url) => {
-          void api.openExternalUrl(url).catch(() => undefined);
-        }}
-        onClose={() => setSettingsOpen(false)}
-      />
       {mixedSourcePrompt ? (
         <div className="dialog-backdrop" role="presentation">
           <section className="compact-dialog" role="dialog" aria-modal="true" aria-labelledby="mixed-source-title">

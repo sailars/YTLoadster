@@ -11,7 +11,6 @@ import { localeStorageKey } from "./lib/i18n";
 import { notificationsStorageKey } from "./lib/notifications";
 import { automaticUpdateChecksStorageKey } from "./lib/updates";
 import type { Job } from "./lib/types";
-import * as youtubeAuth from "./lib/youtubeAuth";
 import "./styles.css";
 
 vi.mock("./lib/api", () => ({
@@ -22,15 +21,25 @@ vi.mock("./lib/api", () => ({
     getSettings: vi.fn().mockResolvedValue({
       concurrency: 2,
       fragmentConcurrency: 1,
-      downloadRetries: 10,
+      downloadRetries: 3,
       fileAccessRetries: 3,
-      fragmentRetries: 10,
+      fragmentRetries: 3,
       customUserAgentEnabled: false,
       customUserAgent: "",
       includeVideoTechnicalDetailsInFilename: false,
+      filenameTemplate: "title",
+      filenameCollisionPolicy: "rename",
       playlistFormatSelectionMode: "strict",
       preventSystemSleepWhileDownloading: false,
       minimizeToTray: true,
+      completionSoundEnabled: false,
+      showThumbnails: true,
+      accentColor: "blue",
+      proxyMode: "system",
+      proxyHost: "",
+      proxyPort: 0,
+      proxyUsername: "",
+      proxyPasswordSet: false,
     }),
     getYoutubeAuthStatus: vi.fn().mockResolvedValue({
       supported: true,
@@ -39,11 +48,9 @@ vi.mock("./lib/api", () => ({
     }),
     startYoutubeAuth: vi.fn().mockResolvedValue({
       browser: "Microsoft Edge",
-      websocketUrl: null,
     }),
     startYoutubeWebviewAuth: vi.fn().mockResolvedValue({
       browser: "WebView2",
-      websocketUrl: null,
     }),
     getYoutubeWebviewAuthState: vi.fn().mockResolvedValue({
       open: true,
@@ -62,15 +69,7 @@ vi.mock("./lib/api", () => ({
     getYoutubeAuthWindowState: vi.fn().mockResolvedValue({
       open: true,
       sessionDetected: false,
-    }),
-    prepareYoutubeAuthCapture: vi.fn().mockResolvedValue({
-      browser: "Microsoft Edge",
-      websocketUrl: "ws://127.0.0.1:9222/devtools/browser/test",
-    }),
-    completeYoutubeAuth: vi.fn().mockResolvedValue({
-      supported: true,
-      authenticated: true,
-      browser: "Microsoft Edge",
+      status: { supported: true, authenticated: false, browser: null },
     }),
     signOutYoutube: vi.fn().mockResolvedValue({
       supported: true,
@@ -85,15 +84,25 @@ vi.mock("./lib/api", () => ({
     updateSettings: vi.fn().mockResolvedValue({
       concurrency: 4,
       fragmentConcurrency: 4,
-      downloadRetries: 10,
+      downloadRetries: 3,
       fileAccessRetries: 3,
-      fragmentRetries: 10,
+      fragmentRetries: 3,
       customUserAgentEnabled: false,
       customUserAgent: "",
       includeVideoTechnicalDetailsInFilename: false,
+      filenameTemplate: "title",
+      filenameCollisionPolicy: "rename",
       playlistFormatSelectionMode: "strict",
       preventSystemSleepWhileDownloading: false,
       minimizeToTray: true,
+      completionSoundEnabled: false,
+      showThumbnails: true,
+      accentColor: "blue",
+      proxyMode: "system",
+      proxyHost: "",
+      proxyPort: 0,
+      proxyUsername: "",
+      proxyPasswordSet: false,
     }),
     setTrayLocale: vi.fn().mockResolvedValue(undefined),
     selectDownloadDir: vi.fn().mockResolvedValue("D:/Video"),
@@ -109,6 +118,8 @@ vi.mock("./lib/api", () => ({
       updateAvailable: false,
       releaseUrl: "https://github.com/sailars/YTLoadster/releases/latest",
     }),
+    checkComponentUpdates: vi.fn().mockResolvedValue([]),
+    installComponentUpdate: vi.fn().mockResolvedValue("2026.09.01"),
     probeUrl: vi.fn().mockResolvedValue({
       title: "Example Video",
       uploader: "Channel",
@@ -130,6 +141,9 @@ vi.mock("./lib/api", () => ({
       title: "Example Playlist",
       entries: [],
     }),
+    beginPlaylistAnalysis: vi.fn().mockResolvedValue(undefined),
+    cancelPlaylistAnalysis: vi.fn().mockResolvedValue(undefined),
+    cancelUrlAnalysis: vi.fn().mockResolvedValue(undefined),
     probePlaylistItem: vi.fn(),
     checkHistoryDuplicates: vi.fn().mockResolvedValue([]),
     enqueueDownloadBatch: vi.fn().mockResolvedValue({ queued: [], rejected: [] }),
@@ -193,11 +207,16 @@ describe("App", () => {
     document.documentElement.style.removeProperty("--tt-y");
     document.documentElement.style.removeProperty("--tt-r");
     document.documentElement.style.removeProperty("--tt-dur");
+    document.documentElement.classList.remove("theme-transition-interactive");
     delete (document as unknown as { startViewTransition?: unknown }).startViewTransition;
     vi.mocked(readText).mockResolvedValue("");
     vi.mocked(writeText).mockResolvedValue(undefined);
     vi.mocked(isPermissionGranted).mockResolvedValue(true);
     vi.mocked(requestPermission).mockResolvedValue("granted");
+    vi.mocked(api.getYoutubeAuthWindowState).mockResolvedValue({
+      open: true, sessionDetected: false,
+      status: { supported: true, authenticated: false, browser: null },
+    });
     vi.mocked(api.checkForUpdates).mockResolvedValue({
       currentVersion: "0.1.0",
       latestVersion: "0.1.0",
@@ -207,6 +226,7 @@ describe("App", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -278,7 +298,7 @@ describe("App", () => {
     const videoInput = screen.getByLabelText(/ссылка на видео/i);
     fireEvent.change(videoInput, { target: { value: videoUrl } });
     expect(await screen.findByText("Example Video", {}, { timeout: 2_000 })).toBeInTheDocument();
-    expect(api.probeUrl).toHaveBeenCalledWith(videoUrl, null);
+    expect(api.probeUrl).toHaveBeenCalledWith(videoUrl, null, expect.any(String));
 
     fireEvent.change(videoInput, { target: { value: playlistUrl } });
     expect(await screen.findByText("Independent Playlist", {}, { timeout: 2_000 })).toBeInTheDocument();
@@ -291,8 +311,10 @@ describe("App", () => {
     expect(api.probeUrl).toHaveBeenCalledTimes(1);
 
     fireEvent.change(screen.getByLabelText(/ссылка на видео/i), { target: { value: nextVideoUrl } });
-    await waitFor(() => expect(api.probeUrl).toHaveBeenCalledWith(nextVideoUrl, null), { timeout: 2_000 });
+    await waitFor(() => expect(api.probeUrl).toHaveBeenCalledWith(nextVideoUrl, null, expect.any(String)), { timeout: 2_000 });
     expect(api.probeUrl).toHaveBeenCalledTimes(2);
+    const firstVideoAnalysisId = vi.mocked(api.probeUrl).mock.calls[0][2];
+    expect(api.cancelUrlAnalysis).toHaveBeenCalledWith(firstVideoAnalysisId);
 
     await act(async () => {
       finishPlaylistItem?.({
@@ -325,7 +347,7 @@ describe("App", () => {
     expect(await screen.findByRole("dialog", { name: "Ссылка содержит видео и плейлист" }, { timeout: 2_000 })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Только ролик" }));
 
-    await waitFor(() => expect(api.probeUrl).toHaveBeenCalledWith("https://www.youtube.com/watch?v=mixed-item", null), { timeout: 2_000 });
+    await waitFor(() => expect(api.probeUrl).toHaveBeenCalledWith("https://www.youtube.com/watch?v=mixed-item", null, expect.any(String)), { timeout: 2_000 });
     expect(screen.getByLabelText(/ссылка на видео/i)).toHaveValue("https://www.youtube.com/watch?v=mixed-item");
     expect(screen.getByRole("button", { name: /^Новая загрузка$/ })).toHaveAttribute("aria-current", "page");
   });
@@ -339,7 +361,7 @@ describe("App", () => {
     expect(await screen.findByRole("dialog", { name: "Ссылка содержит видео и плейлист" }, { timeout: 2_000 })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Весь плейлист" }));
 
-    await waitFor(() => expect(api.probePlaylist).toHaveBeenCalledWith(mixedUrl, null), { timeout: 2_000 });
+    await waitFor(() => expect(api.probePlaylist).toHaveBeenCalledWith(mixedUrl, null, expect.any(String)), { timeout: 2_000 });
     expect(screen.getByRole("button", { name: /^Плейлист$/ })).toHaveAttribute("aria-current", "page");
   });
 
@@ -522,7 +544,7 @@ describe("App", () => {
     window.localStorage.setItem(themeStorageKey, "light");
     const startViewTransition = vi.fn((update: () => void) => {
       update();
-      return {};
+      return { finished: Promise.resolve() };
     });
     Object.defineProperty(document, "startViewTransition", {
       configurable: true,
@@ -564,6 +586,32 @@ describe("App", () => {
     expect(document.documentElement).toHaveAttribute("data-theme", "light");
   });
 
+  it("lets the updated screen receive input after one second while the theme animation continues", async () => {
+    let finishTransition: () => void = () => undefined;
+    const finished = new Promise<void>((resolve) => { finishTransition = resolve; });
+    Object.defineProperty(document, "startViewTransition", {
+      configurable: true,
+      value: (update: () => void) => {
+        update();
+        return { finished };
+      },
+    });
+
+    render(<App />);
+    vi.useFakeTimers();
+    act(() => fireEvent.click(screen.getByRole("button", { name: /включить тёмную тему/i })));
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    expect(document.documentElement).not.toHaveClass("theme-transition-interactive");
+    act(() => vi.advanceTimersByTime(999));
+    expect(document.documentElement).not.toHaveClass("theme-transition-interactive");
+    act(() => vi.advanceTimersByTime(1));
+    expect(document.documentElement).toHaveClass("theme-transition-interactive");
+
+    await act(async () => { finishTransition(); await finished; });
+    expect(document.documentElement).not.toHaveClass("theme-transition-interactive");
+  });
+
   it("enables native completion notifications from the header", async () => {
     render(<App />);
 
@@ -579,6 +627,7 @@ describe("App", () => {
     expect(api.showSystemNotification).toHaveBeenCalledWith(
       "Уведомления включены",
       "Программа сообщит, когда загрузка завершится.",
+      false,
     );
   });
 
@@ -607,6 +656,8 @@ describe("App", () => {
     await waitFor(() => expect(enableButton).toHaveAttribute("aria-busy", "true"));
     expect(enableButton).toHaveAttribute("aria-disabled", "true");
     expect(enableButton).not.toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    expect(screen.getByRole("switch", { name: /звук при завершении загрузки/i })).toBeDisabled();
 
     await act(async () => resolvePermission(true));
     await waitFor(() => {
@@ -643,7 +694,120 @@ describe("App", () => {
     expect(api.showSystemNotification).toHaveBeenCalledWith(
       "Загрузка завершена",
       "Файл «Finished Video» успешно сохранён на устройство.",
+      true,
     );
+  });
+
+  it("requests one notification with its native sound for duplicate completion events", async () => {
+    window.localStorage.setItem(notificationsStorageKey, "true");
+    const initialSettings = await api.getSettings();
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...initialSettings, completionSoundEnabled: true });
+    let onUpdated: ((job: Job) => void) | undefined;
+    let onFinished: ((event: { job: Job; outputPath: string; history: null }) => void) | undefined;
+    vi.mocked(api.onDownloadUpdated).mockImplementationOnce(async (callback) => { onUpdated = callback; return () => undefined; });
+    vi.mocked(api.onDownloadFinished).mockImplementationOnce(async (callback) => { onFinished = callback; return () => undefined; });
+    render(<App />);
+    await waitFor(() => expect(onFinished).toBeDefined());
+    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
+    const completedJob: Job = {
+      id: 73, state: "Completed",
+      request: { url: "https://youtube.com/watch?v=sound", title: "Finished", preset: "mp4Video", destinationDir: "D:/Video" },
+    };
+    await act(async () => {
+      onUpdated?.(completedJob);
+      onFinished?.({ job: completedJob, outputPath: "D:/Video/Finished.mp4", history: null });
+    });
+    await waitFor(() => expect(api.showSystemNotification).toHaveBeenCalledTimes(1));
+    expect(api.showSystemNotification).toHaveBeenCalledWith("Загрузка завершена", expect.any(String), true);
+  });
+
+  it.each(["sidebar", "settings"])("synchronizes completion notifications and sound from %s and restores the choice", async (source) => {
+    const view = render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    const soundSwitch = screen.getByRole("switch", { name: /звук при завершении загрузки/i });
+    expect(soundSwitch).not.toBeChecked();
+
+    await userEvent.click(source === "settings" ? soundSwitch : screen.getByRole("button", { name: /включить уведомления/i }));
+    await waitFor(() => expect(soundSwitch).toBeChecked());
+    await waitFor(() => expect(soundSwitch).not.toBeDisabled());
+    expect(screen.getByRole("button", { name: /выключить уведомления/i })).toHaveAttribute("aria-pressed", "true");
+    expect(api.updateSettings).toHaveBeenLastCalledWith({ completionSoundEnabled: true });
+    expect(window.localStorage.getItem(notificationsStorageKey)).toBe("true");
+
+    view.unmount();
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    const restoredSwitch = screen.getByRole("switch", { name: /звук при завершении загрузки/i });
+    expect(restoredSwitch).toBeChecked();
+    await userEvent.click(source === "settings" ? restoredSwitch : screen.getByRole("button", { name: /выключить уведомления/i }));
+    await waitFor(() => expect(restoredSwitch).not.toBeChecked());
+    expect(screen.getByRole("button", { name: /включить уведомления/i })).toHaveAttribute("aria-pressed", "false");
+    expect(api.updateSettings).toHaveBeenLastCalledWith({ completionSoundEnabled: false });
+    expect(window.localStorage.getItem(notificationsStorageKey)).toBe("false");
+  });
+
+  it("does not play a completion sound when notifications are disabled despite the old sound setting", async () => {
+    const initialSettings = await api.getSettings();
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...initialSettings, completionSoundEnabled: true });
+    window.localStorage.setItem(notificationsStorageKey, "false");
+    let onUpdated!: (job: Job) => void;
+    let onFinished!: (event: { job: Job; outputPath: string; history: null }) => void;
+    vi.mocked(api.onDownloadUpdated).mockImplementationOnce(async (callback) => { onUpdated = callback; return () => undefined; });
+    vi.mocked(api.onDownloadFinished).mockImplementationOnce(async (callback) => { onFinished = callback; return () => undefined; });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    expect(screen.getByRole("switch", { name: /звук при завершении загрузки/i })).not.toBeChecked();
+    const job: Job = { id: 74, state: "Completed", request: { url: "https://youtube.com/watch?v=muted", preset: "mp4Video", destinationDir: "D:/Video" } };
+    await act(async () => {
+      onUpdated(job);
+      onFinished({ job, outputPath: "D:/Video/muted.mp4", history: null });
+    });
+    expect(api.showSystemNotification).not.toHaveBeenCalled();
+  });
+
+  it("keeps both completion controls disabled when notification permission is denied from settings", async () => {
+    vi.mocked(isPermissionGranted).mockResolvedValueOnce(false);
+    vi.mocked(requestPermission).mockResolvedValueOnce("denied");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    const soundSwitch = screen.getByRole("switch", { name: /звук при завершении загрузки/i });
+    await userEvent.click(soundSwitch);
+    await waitFor(() => expect(requestPermission).toHaveBeenCalled());
+    await waitFor(() => expect(soundSwitch).not.toBeDisabled());
+    expect(soundSwitch).not.toBeChecked();
+    expect(screen.getByRole("button", { name: /включить уведомления/i })).toHaveAttribute("aria-pressed", "false");
+    expect(window.localStorage.getItem(notificationsStorageKey)).toBe("false");
+    expect(api.showSystemNotification).not.toHaveBeenCalled();
+  });
+
+  it("disables both completion controls without sound when a completion notification fails", async () => {
+    window.localStorage.setItem(notificationsStorageKey, "true");
+    vi.mocked(api.showSystemNotification).mockRejectedValueOnce(new Error("notification unavailable"));
+    let onUpdated!: (job: Job) => void;
+    vi.mocked(api.onDownloadUpdated).mockImplementationOnce(async (callback) => { onUpdated = callback; return () => undefined; });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/i }));
+    await act(async () => onUpdated({ id: 75, state: "Completed", request: { url: "https://youtube.com/watch?v=failed-toast", preset: "mp4Video", destinationDir: "D:/Video" } }));
+    await waitFor(() => expect(screen.getByRole("switch", { name: /звук при завершении загрузки/i })).not.toBeChecked());
+    expect(screen.getByRole("button", { name: /включить уведомления/i })).toHaveAttribute("aria-pressed", "false");
+    expect(api.showSystemNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send more completion notifications after switching off during delivery", async () => {
+    window.localStorage.setItem(notificationsStorageKey, "true");
+    let finishNotification!: () => void;
+    vi.mocked(api.showSystemNotification).mockImplementationOnce(() => new Promise<void>((resolve) => { finishNotification = resolve; }));
+    let onUpdated!: (job: Job) => void;
+    vi.mocked(api.onDownloadUpdated).mockImplementationOnce(async (callback) => { onUpdated = callback; return () => undefined; });
+    render(<App />);
+    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
+    await act(async () => onUpdated({ id: 76, state: "Completed", request: { url: "https://youtube.com/watch?v=late-toast", preset: "mp4Video", destinationDir: "D:/Video" } }));
+    await waitFor(() => expect(finishNotification).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: /выключить уведомления/i }));
+    await act(async () => finishNotification());
+    await act(async () => onUpdated({ id: 77, state: "Completed", request: { url: "https://youtube.com/watch?v=next-toast", preset: "mp4Video", destinationDir: "D:/Video" } }));
+    expect(api.showSystemNotification).toHaveBeenCalledTimes(1);
+    expect(window.localStorage.getItem(notificationsStorageKey)).toBe("false");
   });
 
   it("restores the saved dark theme", async () => {
@@ -656,6 +820,16 @@ describe("App", () => {
     const themeButton = screen.getByRole("button", { name: /включить светлую тему/i });
     expect(themeButton.querySelector(".moon-icon")).toBeInTheDocument();
     expect(themeButton.querySelector(".sidebar-label")).toHaveTextContent("Тёмная тема");
+  });
+
+  it("applies a saved accent color and shows it selected in Appearance", async () => {
+    const initialSettings = await api.getSettings();
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...initialSettings, accentColor: "purple" });
+    render(<App />);
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("data-accent", "purple"));
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: "Внешний вид" }));
+    expect(screen.getByRole("button", { name: "Фиолетовый" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("shows the analyzed video preview actions and clears the URL field", async () => {
@@ -700,7 +874,7 @@ describe("App", () => {
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=x");
 
     expect(await screen.findByText("Example Video")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Итоговый файл" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Итоговая загрузка" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Профиль скачивания" })).toHaveTextContent("Лучшее качество");
     expect(screen.queryByRole("button", { name: /анализировать/i })).not.toBeInTheDocument();
   });
@@ -731,7 +905,7 @@ describe("App", () => {
     await screen.findByText("480p Video");
     await selectParameter("Профиль скачивания", "mp4-480");
 
-    const summary = screen.getByRole("region", { name: "Итоговый файл" });
+    const summary = screen.getByRole("region", { name: "Итоговая загрузка" });
     expect(summary).toHaveTextContent("MP4 (H.264)");
     expect(summary).toHaveTextContent("480p");
     expect(summary).toHaveTextContent("30fps");
@@ -858,9 +1032,19 @@ describe("App", () => {
       customUserAgentEnabled: false,
       customUserAgent: "",
       includeVideoTechnicalDetailsInFilename: true,
+      filenameTemplate: "title",
+      filenameCollisionPolicy: "rename",
       playlistFormatSelectionMode: "strict",
       preventSystemSleepWhileDownloading: false,
       minimizeToTray: true,
+      completionSoundEnabled: false,
+      showThumbnails: true,
+      accentColor: "blue",
+      proxyMode: "system",
+      proxyHost: "",
+      proxyPort: 0,
+      proxyUsername: "",
+      proxyPasswordSet: false,
     });
     vi.mocked(api.probeUrl).mockResolvedValueOnce({
       title: "Filter Logic Video",
@@ -880,11 +1064,11 @@ describe("App", () => {
     await openVideoAdvancedSettings();
 
     await selectParameter("Кодек", "H.264");
-    expect(screen.getByRole("region", { name: "Итоговый файл" })).toHaveTextContent("MP4 (H.264)");
+    expect(screen.getByRole("region", { name: "Итоговая загрузка" })).toHaveTextContent("MP4 (H.264)");
     await selectParameter("Разрешение", "360");
     await selectParameter("Кодек", "VP9");
 
-    const summary = screen.getByRole("region", { name: "Итоговый файл" });
+    const summary = screen.getByRole("region", { name: "Итоговая загрузка" });
     expect(summary).toHaveTextContent("WEBM (VP9)");
     expect(summary).toHaveTextContent("360p");
     expect(summary).toHaveTextContent("30fps");
@@ -914,7 +1098,7 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: /скачать видео/i }));
 
     const duplicateError = await screen.findByText("Видео с этими параметрами уже находится в Очереди загрузок");
-    expect(within(screen.getByRole("region", { name: "Итоговый файл" })).getByRole("alert")).toBe(duplicateError);
+    expect(within(screen.getByRole("region", { name: "Итоговая загрузка" })).getByRole("alert")).toBe(duplicateError);
     expect(urlInput).toHaveValue("https://youtube.com/watch?v=x");
     expect(api.enqueueDownload).toHaveBeenCalledTimes(1);
 
@@ -960,7 +1144,7 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: /скачать аудио/i }));
 
     const error = await screen.findByText("Аудио с этими параметрами уже находится в Очереди загрузок");
-    expect(within(screen.getByRole("region", { name: "Итоговый файл" })).getByRole("alert")).toBe(error);
+    expect(within(screen.getByRole("region", { name: "Итоговая загрузка" })).getByRole("alert")).toBe(error);
 
     await selectParameter("Битрейт", "192K");
 
@@ -977,7 +1161,7 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: /скачать субтитры/i }));
 
     const error = await screen.findByText("Субтитры с этими параметрами уже находятся в Очереди загрузок");
-    expect(within(screen.getByRole("region", { name: "Итоговый файл" })).getByRole("alert")).toBe(error);
+    expect(within(screen.getByRole("region", { name: "Итоговая загрузка" })).getByRole("alert")).toBe(error);
 
     await selectParameter("Формат субтитров", "vtt");
 
@@ -1006,7 +1190,7 @@ describe("App", () => {
     expect(optionByValue(await openParameterMenu("Кодек"), "H.264")).toBeDisabled();
     expect(screen.getByLabelText("Разрешение")).toHaveAttribute("data-value", "1440");
     await selectParameter("Кодек", "VP9");
-    const summary = screen.getByRole("region", { name: "Итоговый файл" });
+    const summary = screen.getByRole("region", { name: "Итоговая загрузка" });
     expect(summary).toHaveTextContent("WEBM (VP9)");
     expect(summary).toHaveTextContent("1440p");
     expect(summary).toHaveTextContent("60fps");
@@ -1257,7 +1441,7 @@ describe("App", () => {
 
     expect(screen.queryByRole("listbox", { name: /качество видео/i })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Разрешение")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Итоговый файл" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Итоговая загрузка" })).toBeInTheDocument();
   });
 
   it("filters video quality variants by container codec and frame rate", async () => {
@@ -1306,11 +1490,11 @@ describe("App", () => {
     await screen.findByText("Detailed Formats");
     await openVideoAdvancedSettings();
 
-    expect(screen.getByRole("region", { name: "Итоговый файл" })).toHaveTextContent("MP4 (AV1 + AAC)");
+    expect(screen.getByRole("region", { name: "Итоговая загрузка" })).toHaveTextContent("MP4 (AV1 + AAC)");
 
     await selectParameter("Контейнер", "webm");
 
-    const summary = screen.getByRole("region", { name: "Итоговый файл" });
+    const summary = screen.getByRole("region", { name: "Итоговая загрузка" });
     expect(summary).toHaveTextContent("WEBM (VP9)");
     expect(summary).toHaveTextContent("30fps");
     expect(summary).not.toHaveTextContent("MP4 (AV1)");
@@ -1388,7 +1572,7 @@ describe("App", () => {
     await selectParameter("\u041a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440", "all");
     expect(containerSelect).toHaveAttribute("data-value", "all");
     expect(screen.getByRole("combobox", { name: "Профиль скачивания" })).toHaveAttribute("data-value", "best");
-    expect(screen.getByRole("region", { name: "Итоговый файл" })).toHaveTextContent("MP4 (AV1 + AAC)");
+    expect(screen.getByRole("region", { name: "Итоговая загрузка" })).toHaveTextContent("MP4 (AV1 + AAC)");
   });
 
   it("selects the best video and audio qualities after analysis", async () => {
@@ -1409,7 +1593,7 @@ describe("App", () => {
 
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=x");
     await screen.findByText("Sorted by UI");
-    const summary = screen.getByRole("region", { name: "Итоговый файл" });
+    const summary = screen.getByRole("region", { name: "Итоговая загрузка" });
     expect(summary).toHaveTextContent("MP4 (H.264 + AAC)");
     expect(summary).toHaveTextContent("1080p");
     expect(summary).toHaveTextContent("60fps");
@@ -1439,7 +1623,7 @@ describe("App", () => {
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=mixed");
     await screen.findByText("Mixed best streams");
 
-    expect(screen.getByRole("region", { name: "Итоговый файл" })).toHaveTextContent("MKV (H.264 + Opus)");
+    expect(screen.getByRole("region", { name: "Итоговая загрузка" })).toHaveTextContent("MKV (H.264 + Opus)");
     await userEvent.click(screen.getByRole("button", { name: /скачать/i }));
     expect(api.enqueueDownload).toHaveBeenCalledWith(expect.objectContaining({
       formatId: "137",
@@ -1455,12 +1639,23 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     await userEvent.click(screen.getByLabelText(/использовать вход из браузера/i));
-    await userEvent.click(screen.getByRole("button", { name: /закрыть настройки/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=x");
 
     expect(await screen.findByText(/Не удалось найти cookies Chrome/i)).toBeInTheDocument();
     expect(screen.queryByText(/could not find chrome cookies database/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a readable error when URL analysis exceeds sixty seconds", async () => {
+    vi.mocked(api.probeUrl).mockRejectedValueOnce("analysis-error:timeout");
+    render(<App />);
+
+    await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=timeout");
+
+    expect(await screen.findByText(/не удалось проанализировать ссылку\. проверьте подключение/i)).toBeInTheDocument();
+    expect(screen.getByText(/VPN или системный прокси/i)).toBeInTheDocument();
   });
 
   it("shows a readable DPAPI error for Chromium cookies", async () => {
@@ -1470,12 +1665,13 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     await userEvent.click(screen.getByLabelText(/использовать вход из браузера/i));
     await selectParameter(/браузер для входа/i, "brave");
-    await userEvent.click(screen.getByRole("button", { name: /закрыть настройки/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=x");
 
-    expect(await screen.findByText("Не удалось расшифровать cookies выбранного Chromium-браузера через защиту Windows (DPAPI). Некоторые Chromium-браузеры дополнительно защищают cookies, и программа не может их прочитать. Это не ошибка загрузчика: используйте Firefox/LibreWolf для входа или отключите вход через браузер")).toBeInTheDocument();
+    expect(await screen.findByText("Не удалось расшифровать cookies выбранного Chromium-браузера через защиту Windows (DPAPI). Некоторые Chromium-браузеры дополнительно защищают cookies, и программа не может их прочитать. Это не ошибка YTLoadster. Используйте Firefox/LibreWolf для авторизации или используйте \"Войти в YouTube\".")).toBeInTheDocument();
     expect(screen.queryByText(/Failed to decrypt with DPAPI/i)).not.toBeInTheDocument();
   });
 
@@ -1486,9 +1682,10 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     await userEvent.click(screen.getByLabelText(/использовать вход из браузера/i));
     await selectParameter(/браузер для входа/i, "vivaldi");
-    await userEvent.click(screen.getByRole("button", { name: /закрыть настройки/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=x");
 
     expect(await screen.findByText("Не удалось получить доступ к cookies выбранного браузера. Закройте ваш браузер и повторите попытку. Если ошибка останется, используйте другой браузер для входа (например, Firefox).")).toBeInTheDocument();
@@ -1502,9 +1699,10 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     await userEvent.click(screen.getByLabelText(/использовать вход из браузера/i));
     await selectParameter(/браузер для входа/i, "firefox");
-    await userEvent.click(screen.getByRole("button", { name: /закрыть настройки/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=x");
 
     expect(await screen.findByText("Не удалось получить доступ к cookies выбранного браузера. Закройте ваш браузер и повторите попытку.")).toBeInTheDocument();
@@ -1553,7 +1751,7 @@ describe("App", () => {
 
     expect(
       await screen.findByText(
-        "Для этого видео YouTube требует войти в аккаунт и подтвердить возраст. Откройте Настройки → Вход в YouTube, выполните вход и повторите попытку. Если вход уже выполнен, убедитесь, что возраст подтверждён в аккаунте.",
+        "Для этого видео YouTube требует войти в аккаунт и подтвердить возраст. Откройте Настройки → Авторизация → Войти в YouTube, выполните вход и повторите попытку. Если вход уже выполнен, убедитесь, что возраст подтверждён в аккаунте.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/cookies-from-browser|github\.com|yt-dlp/i)).not.toBeInTheDocument();
@@ -1567,7 +1765,7 @@ describe("App", () => {
 
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=pe9e-3BME64");
 
-    expect(await screen.findByText("YouTube просит подтвердить, что вы не робот. Войдите в аккаунт YouTube/авторизуйтесь через браузер в настройках приложения и повторите попытку.")).toBeInTheDocument();
+    expect(await screen.findByText("YouTube просит подтвердить, что вы не робот. Откройте Настройки → Авторизация → Войти в YouTube, выполните вход и повторите попытку.")).toBeInTheDocument();
     expect(screen.queryByText(/cookies-from-browser|github\.com|yt-dlp/i)).not.toBeInTheDocument();
   });
 
@@ -1575,6 +1773,7 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     await userEvent.click(screen.getByLabelText(/использовать вход из браузера/i));
     const browserSelect = screen.getByLabelText(/браузер для входа/i);
     const browserMenu = await openParameterMenu(/браузер для входа/i);
@@ -1591,6 +1790,7 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     await userEvent.click(screen.getByLabelText(/использовать вход из браузера/i));
     const browserSelect = screen.getByLabelText(/браузер для входа/i);
     const browserField = browserSelect.closest<HTMLElement>(".settings-field");
@@ -1607,6 +1807,7 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
 
     expect(screen.getByText("Выберите браузер, в котором уже выполнен вход в YouTube. Обычно этого достаточно для возрастных и аккаунтных видео.")).toBeInTheDocument();
     expect(screen.getByText("Не удалось использовать вход из браузера?")).toBeInTheDocument();
@@ -1626,6 +1827,7 @@ describe("App", () => {
 
     await waitFor(() => expect(api.getAppStatus).toHaveBeenCalled());
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     await userEvent.click(screen.getByLabelText(/использовать вход из браузера/i));
     const browserMenu = await openParameterMenu(/браузер для входа/i);
 
@@ -1688,9 +1890,10 @@ describe("App", () => {
     expect(screen.queryByLabelText(/использовать вход из браузера/i)).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
 
-    expect(screen.getByRole("dialog", { name: /настройки/i })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /основное/i })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("region", { name: /настройки/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /авторизация/i })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByLabelText(/использовать вход из браузера/i)).toBeInTheDocument();
   });
 
@@ -1698,6 +1901,7 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
 
     const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
     const helpIcon = screen.getByRole("img", {
@@ -1713,6 +1917,7 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
     await waitFor(() => expect(loginButton).toBeEnabled());
     await userEvent.click(loginButton);
@@ -1720,7 +1925,7 @@ describe("App", () => {
     const warning = screen.getByRole("alertdialog", { name: /перед входом в YouTube/i });
     expect(within(warning).getByText(/выберите нужный аккаунт, если их несколько/i)).toBeInTheDocument();
     expect(within(warning).getByText(/дождитесь.+откроется YouTube/i)).toBeInTheDocument();
-    expect(within(warning).getByText(/вручную закройте только это отдельное окно/i)).toBeInTheDocument();
+    expect(within(warning).getByText(/сессия сохранится автоматически.+окно можно оставить открытым/i)).toBeInTheDocument();
     expect(api.startYoutubeAuth).not.toHaveBeenCalled();
 
     await userEvent.click(within(warning).getByRole("button", { name: /понятно, продолжить/i }));
@@ -1737,6 +1942,7 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /settings/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /authorization/i }));
     const loginButton = screen.getByRole("button", { name: /sign in to YouTube/i });
     await waitFor(() => expect(loginButton).toBeEnabled());
     await userEvent.click(loginButton);
@@ -1744,7 +1950,7 @@ describe("App", () => {
     const warning = screen.getByRole("alertdialog", { name: /before signing in to YouTube/i });
     expect(within(warning).getByText(/select the account.+if more than one is available/i)).toBeInTheDocument();
     expect(within(warning).getByText(/wait until YouTube opens/i)).toBeInTheDocument();
-    expect(within(warning).getByText(/manually close only that separate browser window/i)).toBeInTheDocument();
+    expect(within(warning).getByText(/session will be saved automatically.+leave the window open/i)).toBeInTheDocument();
     await userEvent.click(within(warning).getByRole("button", { name: "Continue" }));
 
     expect(api.startYoutubeAuth).toHaveBeenCalledWith("chrome");
@@ -1755,6 +1961,7 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
     await waitFor(() => expect(loginButton).toBeEnabled());
     await userEvent.click(loginButton);
@@ -1776,6 +1983,7 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     const webviewButton = document.querySelector<HTMLButtonElement>(".youtube-auth-webview-button");
     expect(webviewButton).not.toBeNull();
     expect(webviewButton).toHaveAttribute("hidden");
@@ -1790,60 +1998,171 @@ describe("App", () => {
     expect(api.getYoutubeWebviewAuthState).toHaveBeenCalled();
   });
 
-  it("reenables YouTube sign-in when the authentication browser is closed", async () => {
+  it.each(["windows", "macos"])("reenables YouTube sign-in when the %s browser closes before authentication", async (platform) => {
+    vi.mocked(api.getAppStatus).mockResolvedValueOnce({ name: "YTLoadster", ready: true, platform });
     vi.mocked(api.getYoutubeAuthWindowState).mockResolvedValueOnce({
-      open: false,
-      sessionDetected: false,
+      open: false, sessionDetected: false,
+      status: { supported: true, authenticated: false, browser: null },
     });
-    vi.spyOn(youtubeAuth, "readYoutubeAuthCookies").mockResolvedValueOnce([]);
     render(<App />);
-
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
     await waitFor(() => expect(loginButton).toBeEnabled());
     await userEvent.click(loginButton);
     await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
 
     expect(await screen.findByText(/окно браузера закрыто.+можно повторить/i)).toBeInTheDocument();
-    expect(api.cancelYoutubeAuth).toHaveBeenCalledTimes(1);
     expect(loginButton).toBeEnabled();
+    expect(window.localStorage.getItem("ytloadster.browserAuth") ?? "").not.toContain('"useYoutubeSession":true');
   });
 
-  it("shows that the account was detected and completes YouTube sign-in", async () => {
-    vi.mocked(api.getYoutubeAuthWindowState)
-      .mockResolvedValueOnce({ open: true, sessionDetected: true })
-      .mockResolvedValueOnce({ open: false, sessionDetected: true });
-    vi.spyOn(youtubeAuth, "readYoutubeAuthCookies").mockResolvedValueOnce([
-      {
-        name: "SAPISID",
-        value: "session",
-        domain: ".youtube.com",
-        path: "/",
-        expires: 1_900_000_000,
-        secure: true,
-      },
-    ]);
-    vi.spyOn(youtubeAuth, "closeYoutubeAuthBrowser").mockResolvedValue();
+  it.each([
+    { platform: "windows", locale: "ru", theme: "light" },
+    { platform: "macos", locale: "en", theme: "dark" },
+  ])("activates the saved $platform YouTube session in $locale while the browser stays open", async ({ platform, locale, theme }) => {
+    window.localStorage.setItem(localeStorageKey, locale);
+    window.localStorage.setItem(themeStorageKey, theme);
+    vi.mocked(api.getAppStatus).mockResolvedValueOnce({ name: "YTLoadster", ready: true, platform });
+    const status = { supported: true, authenticated: true, browser: "Google Chrome" };
+    vi.mocked(api.startYoutubeAuth).mockResolvedValueOnce({ browser: "Google Chrome" });
+    vi.mocked(api.getYoutubeAuthWindowState).mockResolvedValue({ open: true, sessionDetected: true, status });
     render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /settings|настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /authorization|авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /sign in to YouTube|войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    const dialog = screen.getByRole("alertdialog");
+    expect(within(dialog).getByText(/leave the window open|окно можно оставить открытым/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Continue|понятно, продолжить/i }));
 
+    expect(await screen.findByText(/signed in through Google Chrome|вход выполнен через Google Chrome/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign out of YouTube|выйти из YouTube/i })).toBeEnabled();
+    expect(window.localStorage.getItem("ytloadster.browserAuth")).toContain('"useYoutubeSession":true');
+    expect(api.cancelYoutubeAuth).not.toHaveBeenCalled();
+    expect(document.documentElement).toHaveAttribute("data-theme", theme);
+    // The next probe can use the session before any closed-window response.
+    await userEvent.click(screen.getByRole("button", { name: /new download|новая загрузка/i }));
+    fireEvent.change(screen.getByPlaceholderText(/youtube\.com/i), { target: { value: "https://youtube.com/watch?v=authenticated" } });
+    await waitFor(() => expect(api.probeUrl).toHaveBeenCalledWith(
+      "https://youtube.com/watch?v=authenticated", { kind: "youtubeSession" }, expect.any(String),
+    ));
+  });
+
+  it("ignores late YouTube startup after the app is unmounted", async () => {
+    let finishStart!: (value: { browser: string }) => void;
+    vi.mocked(api.startYoutubeAuth).mockImplementationOnce(() => new Promise((resolve) => { finishStart = resolve; }));
+    const { unmount } = render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
     await waitFor(() => expect(loginButton).toBeEnabled());
     await userEvent.click(loginButton);
     await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
+    expect(api.startYoutubeAuth).toHaveBeenCalledTimes(1);
+    unmount();
+    vi.useFakeTimers();
+    await act(async () => finishStart({ browser: "Microsoft Edge" }));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(api.getYoutubeAuthWindowState).not.toHaveBeenCalled();
+  });
 
-    expect(await screen.findByText(/аккаунт обнаружен.+закройте отдельное окно/i)).toBeInTheDocument();
-    expect(await screen.findByText(/вход выполнен через Microsoft Edge/i, {}, { timeout: 4_000 })).toBeInTheDocument();
-    expect(api.completeYoutubeAuth).toHaveBeenCalledTimes(1);
-    expect(
-      vi.mocked(youtubeAuth.closeYoutubeAuthBrowser).mock.invocationCallOrder[0],
-    ).toBeLessThan(vi.mocked(api.completeYoutubeAuth).mock.invocationCallOrder[0]);
+  it("keeps the saved YouTube session after the separate browser closes", async () => {
+    const status = { supported: true, authenticated: true, browser: "Microsoft Edge" };
+    vi.mocked(api.getYoutubeAuthWindowState)
+      .mockResolvedValueOnce({ open: true, sessionDetected: true, status })
+      .mockResolvedValueOnce({ open: false, sessionDetected: true, status });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
+    expect(await screen.findByText(/вход выполнен через Microsoft Edge/i)).toBeInTheDocument();
+    await waitFor(() => expect(api.getYoutubeAuthWindowState).toHaveBeenCalledTimes(2));
+    expect(screen.getByText(/вход выполнен через Microsoft Edge/i)).toBeInTheDocument();
+    expect(window.localStorage.getItem("ytloadster.browserAuth")).toContain('"useYoutubeSession":true');
+  });
+
+  it("activates a session saved in the background before the first window-state poll", async () => {
+    vi.mocked(api.getYoutubeAuthWindowState).mockResolvedValueOnce({
+      open: false, sessionDetected: true,
+      status: { supported: true, authenticated: true, browser: "Microsoft Edge" },
+    });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
+    expect(await screen.findByText(/вход выполнен через Microsoft Edge/i)).toBeInTheDocument();
+    expect(window.localStorage.getItem("ytloadster.browserAuth")).toContain('"useYoutubeSession":true');
+  });
+
+  it("disables saved-session usage when the user logs out in the open browser", async () => {
+    vi.mocked(api.getYoutubeAuthWindowState)
+      .mockResolvedValueOnce({ open: true, sessionDetected: true,
+        status: { supported: true, authenticated: true, browser: "Microsoft Edge" } })
+      .mockResolvedValueOnce({ open: true, sessionDetected: false,
+        status: { supported: true, authenticated: false, browser: null } });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
+    expect(await screen.findByText(/вход выполнен через Microsoft Edge/i)).toBeInTheDocument();
+    await waitFor(() => expect(window.localStorage.getItem("ytloadster.browserAuth")).toContain('"useYoutubeSession":false'));
+    expect(screen.getByText(/сессия сохранится автоматически/i)).toBeInTheDocument();
+  });
+
+  it("ignores an in-flight cookie poll after signing out of YTLoadster", async () => {
+    const status = { supported: true, authenticated: true, browser: "Microsoft Edge" };
+    let finishPoll!: (value: { open: boolean; sessionDetected: boolean; status: typeof status }) => void;
+    vi.mocked(api.getYoutubeAuthWindowState)
+      .mockResolvedValueOnce({ open: true, sessionDetected: true, status })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishPoll = resolve; }));
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    await userEvent.click(screen.getByRole("button", { name: /понятно, продолжить/i }));
+    expect(await screen.findByText(/вход выполнен через Microsoft Edge/i)).toBeInTheDocument();
+    await waitFor(() => expect(finishPoll).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: /выйти из YouTube/i }));
+    await waitFor(() => expect(api.signOutYoutube).toHaveBeenCalledTimes(1));
+    await act(async () => finishPoll({ open: true, sessionDetected: true, status }));
+    expect(screen.queryByText(/вход выполнен через Microsoft Edge/i)).not.toBeInTheDocument();
+    expect(window.localStorage.getItem("ytloadster.browserAuth")).toContain('"useYoutubeSession":false');
+  });
+  it.each([
+    { locale: "ru", message: "Не удалось завершить вход в YouTube." },
+    { locale: "en", message: "Could not complete YouTube sign-in." },
+  ])("localizes a macOS browser connection failure in $locale", async ({ locale, message }) => {
+    window.localStorage.setItem(localeStorageKey, locale);
+    vi.mocked(api.startYoutubeAuth).mockRejectedValueOnce("youtube-auth-connection-failed");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /settings|настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /authorization|авторизация/i }));
+    const loginButton = screen.getByRole("button", { name: /sign in to YouTube|войти в YouTube/i });
+    await waitFor(() => expect(loginButton).toBeEnabled());
+    await userEvent.click(loginButton);
+    await userEvent.click(screen.getByRole("button", { name: /Continue|понятно, продолжить/i }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByText("youtube-auth-connection-failed")).not.toBeInTheDocument();
   });
 
   it("clears saved YouTube sign-in data even when no session is active", async () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     const clearButton = screen.getByRole("button", { name: /очистить данные входа/i });
     await waitFor(() => expect(clearButton).toBeEnabled());
     await userEvent.click(clearButton);
@@ -1861,6 +2180,7 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     const logoutButton = await screen.findByRole("button", { name: /выйти из YouTube/i });
     expect(screen.queryByRole("button", { name: /очистить данные входа/i })).not.toBeInTheDocument();
     await userEvent.click(logoutButton);
@@ -1881,7 +2201,7 @@ describe("App", () => {
     const aboutPanel = screen.getByRole("tabpanel", { name: /о программе/i });
     expect(aboutPanel).toBeInTheDocument();
     expect(within(aboutPanel).getByRole("heading", { name: "YTLoadster" })).toBeInTheDocument();
-    expect(screen.getByText("0.1.1")).toBeInTheDocument();
+    expect(screen.getByText("0.1.2")).toBeInTheDocument();
     expect(screen.getByText(/программа для загрузки видео, аудио и субтитров/i)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "GitHub" })).toHaveAttribute("href", "https://github.com/sailars/YTLoadster");
     expect(await screen.findByText("Установлена актуальная версия.")).toBeInTheDocument();
@@ -1935,6 +2255,90 @@ describe("App", () => {
     expect(await screen.findByText("Установлена актуальная версия.")).toBeInTheDocument();
   });
 
+  it.each([
+    { locale: "ru", neutral: "Отдельные обновления пока не опубликованы.", failure: "Сведения об обновлении недоступны." },
+    { locale: "en", neutral: "Separate updates have not been published yet.", failure: "Update information is unavailable." },
+  ])("distinguishes unpublished component updates from check failures in $locale", async ({ locale, neutral, failure }) => {
+    window.localStorage.setItem(localeStorageKey, locale);
+    vi.mocked(api.checkComponentUpdates).mockResolvedValueOnce([
+      { id: "ffmpeg", currentVersion: "8.1.2", latestVersion: null, state: "notPublished", sourceUrl: null },
+      { id: "ytdlp", currentVersion: "2026.08.19", latestVersion: null, state: "unavailable", sourceUrl: null },
+    ]);
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки|settings/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /о программе|about/i }));
+    await userEvent.click(screen.getByRole("button", { name: /проверить обновления компонентов|check component updates/i }));
+    const message = await screen.findByText(neutral);
+    expect(screen.getByText(failure)).toBeInTheDocument();
+    const row = message.closest("li")!;
+    expect(within(row).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(row).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { locale: "ru", current: "У вас установлена последняя версия.", newer: "Выпущена версия 9.0.2. Обновление через приложение пока недоступно." },
+    { locale: "en", current: "You have the latest version installed.", newer: "Version 9.0.2 has been released. In-app update is not available yet." },
+  ])("shows verified FFmpeg versions without an installable package in $locale", async ({ locale, current, newer }) => {
+    window.localStorage.setItem(localeStorageKey, locale);
+    vi.mocked(api.checkComponentUpdates)
+      .mockResolvedValueOnce([{ id: "ffmpeg", currentVersion: "9.0.2", latestVersion: "9.0.2", state: "upToDate", sourceUrl: "https://ffmpeg.org/download.html" }])
+      .mockResolvedValueOnce([{ id: "ffmpeg", currentVersion: "8.1.2", latestVersion: "9.0.2", state: "newerRelease", sourceUrl: "https://ffmpeg.org/download.html" }]);
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки|settings/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /о программе|about/i }));
+    const check = screen.getByRole("button", { name: /проверить обновления компонентов|check component updates/i });
+    await userEvent.click(check);
+    expect(await screen.findByText(current)).toBeInTheDocument();
+    await userEvent.click(check);
+    const message = await screen.findByText(newer);
+    expect(screen.queryByText(current)).not.toBeInTheDocument();
+    expect(within(message.closest("li")!).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("shows the new Deno version after a component update", async () => {
+    vi.mocked(api.checkComponentUpdates)
+      .mockResolvedValueOnce([
+        { id: "ytdlp", currentVersion: "2026.08.19", latestVersion: "2026.08.19", state: "upToDate", sourceUrl: "https://github.com/yt-dlp/yt-dlp/releases" },
+        { id: "deno", currentVersion: "2.9.2", latestVersion: "2.9.7", state: "available", sourceUrl: "https://github.com/denoland/deno/releases" },
+        { id: "ffmpeg", currentVersion: "8.1.2", latestVersion: null, state: "unavailable", sourceUrl: null },
+      ])
+      .mockResolvedValueOnce([
+        { id: "ytdlp", currentVersion: "2026.08.19", latestVersion: "2026.08.19", state: "upToDate", sourceUrl: "https://github.com/yt-dlp/yt-dlp/releases" },
+        { id: "deno", currentVersion: "2.9.7", latestVersion: "2.9.7", state: "upToDate", sourceUrl: "https://github.com/denoland/deno/releases" },
+        { id: "ffmpeg", currentVersion: "8.1.2", latestVersion: null, state: "unavailable", sourceUrl: null },
+      ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /о программе/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Проверить обновления компонентов" }));
+    expect(await screen.findByText("Установлена версия 2.9.2.")).toBeInTheDocument();
+    expect(screen.getByText("Доступна версия 2.9.7.")).toBeInTheDocument();
+    expect(screen.getByText("Сведения об обновлении недоступны.")).toBeInTheDocument();
+    const denoRow = screen.getByText("Доступна версия 2.9.7.").closest("li");
+    expect(denoRow).not.toBeNull();
+    await userEvent.click(within(denoRow!).getByRole("link", { name: "Страница выпуска" }));
+    expect(api.openExternalUrl).toHaveBeenCalledWith("https://github.com/denoland/deno/releases");
+    await userEvent.click(screen.getByRole("button", { name: "Обновить" }));
+    await waitFor(() => expect(api.installComponentUpdate).toHaveBeenCalledWith("deno"));
+    expect(await screen.findByText("Установлена версия 2.9.7.")).toBeInTheDocument();
+  });
+
+  it("keeps an available component visible after installation fails", async () => {
+    vi.mocked(api.checkComponentUpdates).mockResolvedValueOnce([
+      { id: "deno", currentVersion: "2.9.2", latestVersion: "2.9.3", state: "available", sourceUrl: "https://github.com/denoland/deno/releases" },
+    ]);
+    vi.mocked(api.installComponentUpdate).mockRejectedValueOnce(new Error("checksum mismatch"));
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /о программе/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Проверить обновления компонентов" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Обновить" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось установить обновление. Повторите попытку.");
+    expect(screen.getByRole("button", { name: "Обновить" })).toBeEnabled();
+  });
+
   it("lets the user disable automatic update checks while keeping manual checks", async () => {
     window.localStorage.setItem(automaticUpdateChecksStorageKey, "false");
 
@@ -1942,16 +2346,18 @@ describe("App", () => {
 
     expect(api.checkForUpdates).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
-    await userEvent.click(screen.getByRole("tab", { name: /о программе/i }));
 
-    const automaticCheck = screen.getByRole("switch", {
+    let automaticCheck = screen.getByRole("switch", {
       name: "Автоматически проверять обновления",
     });
     expect(automaticCheck).not.toBeChecked();
 
+    await userEvent.click(screen.getByRole("tab", { name: /о программе/i }));
     await userEvent.click(screen.getByRole("button", { name: "Проверить обновления" }));
     await waitFor(() => expect(api.checkForUpdates).toHaveBeenCalledTimes(1));
 
+    await userEvent.click(screen.getByRole("tab", { name: /общие/i }));
+    automaticCheck = screen.getByRole("switch", { name: "Автоматически проверять обновления" });
     await userEvent.click(automaticCheck);
     expect(automaticCheck).toBeChecked();
     expect(window.localStorage.getItem(automaticUpdateChecksStorageKey)).toBe("true");
@@ -1973,30 +2379,30 @@ describe("App", () => {
     expect(screen.queryByText(/network unavailable/i)).not.toBeInTheDocument();
   });
 
-  it("opens settings on the Main tab after the dialog is reopened", async () => {
+  it("opens settings on General after visiting another section", async () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
     await userEvent.click(screen.getByRole("tab", { name: /о программе/i }));
     expect(screen.getByRole("tab", { name: /о программе/i })).toHaveAttribute("aria-selected", "true");
 
-    await userEvent.click(screen.getByRole("button", { name: /закрыть настройки/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
 
-    expect(screen.getByRole("tab", { name: /основное/i })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByLabelText(/использовать вход из браузера/i)).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /общие/i })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByLabelText(/использовать вход из браузера/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("tabpanel", { name: /о программе/i })).not.toBeInTheDocument();
   });
 
-  it("closes settings when Escape is pressed", async () => {
+  it("closes the settings section when Escape is pressed", async () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
-    expect(screen.getByRole("dialog", { name: /настройки/i })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /^Настройки$/ })).toBeInTheDocument();
 
     await userEvent.keyboard("{Escape}");
 
-    expect(screen.queryByRole("dialog", { name: /настройки/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: /^Настройки$/ })).not.toBeInTheDocument();
   });
 
   it("shows and saves the sleep and tray behavior settings", async () => {
@@ -2034,8 +2440,9 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
     await selectParameter(/язык интерфейса/i, "en");
 
-    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Settings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Queue" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "New download" }));
     expect(screen.getByRole("tab", { name: "Video" })).toBeInTheDocument();
     expect(screen.getByLabelText("Video URL")).toBeInTheDocument();
     expect(window.localStorage.getItem(localeStorageKey)).toBe("en");
@@ -2050,10 +2457,10 @@ describe("App", () => {
     const concurrencySlider = screen.getByRole("slider", { name: /одновременных загрузок/i });
 
     expect(concurrencySlider).toHaveAttribute("data-value", "2");
-    expect(screen.getByRole("button", { name: "Установить Одновременных загрузок: 6" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Установить Одновременных загрузок: 8" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Установить Одновременных загрузок: 16" })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Установить Одновременных загрузок: 6" }));
+    expect(screen.getByRole("button", { name: "Установить Количество одновременных загрузок: 6" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Установить Количество одновременных загрузок: 8" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Установить Количество одновременных загрузок: 16" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Установить Количество одновременных загрузок: 6" }));
 
     expect(api.updateSettings).toHaveBeenCalledWith({ concurrency: 6 });
   });
@@ -2074,10 +2481,74 @@ describe("App", () => {
     });
   });
 
+  it("uses a newly saved default folder in new downloads and playlists", async () => {
+    const initialSettings = await api.getSettings();
+    vi.mocked(api.updateSettings).mockResolvedValueOnce({ ...initialSettings, defaultDownloadDir: "D:/Video" });
+    render(<App />);
+
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /загрузки/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Обзор" }));
+
+    await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ defaultDownloadDir: "D:/Video" }));
+    await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Папка загрузки" })).toHaveValue("D:/Video"));
+    await userEvent.click(screen.getByRole("button", { name: "Плейлист" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Ссылка на плейлист" }), {
+      target: { value: "https://www.youtube.com/playlist?list=PL-default-folder" },
+    });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Папка загрузки" })).toHaveValue("D:/Video"));
+  });
+
+  it("saves a filename template and only the two requested collision choices", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /загрузки/i }));
+
+    await selectParameter("Шаблон имени файла", "channel-title");
+    expect(api.updateSettings).toHaveBeenCalledWith({ filenameTemplate: "channel-title" });
+    const collisionMenu = await openParameterMenu("При совпадении имён");
+    expect(within(collisionMenu).getAllByRole("option")).toHaveLength(2);
+    await userEvent.click(optionByValue(collisionMenu, "replace"));
+    expect(api.updateSettings).toHaveBeenCalledWith({ filenameCollisionPolicy: "replace" });
+  });
+
+  it("saves an authenticated SOCKS5 proxy without putting its password in a visible field", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /сеть/i }));
+    await selectParameter("Прокси", "socks5");
+    await userEvent.type(screen.getByRole("textbox", { name: "Сервер" }), "proxy.example");
+    await userEvent.type(screen.getByRole("spinbutton", { name: "Порт" }), "1080");
+    await userEvent.type(screen.getByRole("textbox", { name: "Логин" }), "test-user");
+    await userEvent.type(screen.getByLabelText("Пароль"), "test-secret");
+    expect(screen.getByLabelText("Пароль")).toHaveAttribute("type", "password");
+    await userEvent.click(screen.getAllByRole("button", { name: "Сохранить" })[0]);
+
+    expect(api.updateSettings).toHaveBeenCalledWith({
+      proxyMode: "socks5", proxyHost: "proxy.example", proxyPort: 1080,
+      proxyUsername: "test-user", proxyPassword: "test-secret",
+    });
+  });
+
+  it("applies system and no-proxy modes without an extra save action", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /сеть/i }));
+
+    expect(screen.getAllByRole("button", { name: "Сохранить" })).toHaveLength(1);
+    await selectParameter("Прокси", "none");
+
+    expect(api.updateSettings).toHaveBeenCalledWith({ proxyMode: "none" });
+    expect(screen.queryByRole("textbox", { name: "Сервер" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Сохранить" })).toHaveLength(1);
+  });
+
   it("uses the calm hover state in custom parameter menus", async () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     await userEvent.click(screen.getByLabelText(/использовать вход из браузера/i));
     const menu = await openParameterMenu(/браузер для входа/i);
     const option = optionByValue(menu, "brave");
@@ -2104,9 +2575,19 @@ describe("App", () => {
       customUserAgentEnabled: false,
       customUserAgent: "",
       includeVideoTechnicalDetailsInFilename: false,
+      filenameTemplate: "title",
+      filenameCollisionPolicy: "rename",
       playlistFormatSelectionMode: "strict",
       preventSystemSleepWhileDownloading: false,
       minimizeToTray: true,
+      completionSoundEnabled: false,
+      showThumbnails: true,
+      accentColor: "blue",
+      proxyMode: "system",
+      proxyHost: "",
+      proxyPort: 0,
+      proxyUsername: "",
+      proxyPasswordSet: false,
     });
     render(<App />);
 
@@ -2156,7 +2637,7 @@ describe("App", () => {
 
     const mode = screen.getByRole("combobox", { name: "Подбор форматов плейлиста" });
     const playlistSection = mode.closest<HTMLElement>(".settings-section");
-    const downloadsSection = screen.getByRole("heading", { name: "Загрузки" }).closest<HTMLElement>(".settings-section");
+    const downloadsSection = screen.getByRole("heading", { name: "Поведение" }).closest<HTMLElement>(".settings-section");
     const fileNamesSection = screen.getByRole("heading", { name: "Имена файлов" }).closest<HTMLElement>(".settings-section");
     const technicalNames = screen.getByRole("checkbox", { name: "Добавлять технические параметры в название видео" });
     expect(playlistSection).not.toBe(downloadsSection);
@@ -2188,9 +2669,9 @@ describe("App", () => {
     const downloadRetries = screen.getByRole("spinbutton", { name: "Попыток загрузки" });
     const fileAccessRetries = screen.getByRole("spinbutton", { name: "Повторов доступа к файлу" });
     const fragmentRetries = screen.getByRole("spinbutton", { name: "Повторов фрагмента" });
-    expect(downloadRetries).toHaveValue(10);
+    expect(downloadRetries).toHaveValue(3);
     expect(fileAccessRetries).toHaveValue(3);
-    expect(fragmentRetries).toHaveValue(10);
+    expect(fragmentRetries).toHaveValue(3);
     expect(downloadRetries).toHaveAttribute("max", "30");
     expect(fileAccessRetries).toHaveAttribute("max", "10");
     expect(fragmentRetries).toHaveAttribute("max", "30");
@@ -2214,9 +2695,9 @@ describe("App", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "По умолчанию" }));
     expect(api.updateSettings).toHaveBeenCalledWith({
-      downloadRetries: 10,
+      downloadRetries: 3,
       fileAccessRetries: 3,
-      fragmentRetries: 10,
+      fragmentRetries: 3,
     });
   });
 
@@ -2224,7 +2705,7 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
-    await userEvent.click(screen.getByRole("tab", { name: /загрузки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /сеть/i }));
 
     const toggle = screen.getByLabelText("Использовать пользовательский User-Agent");
     const input = screen.getByRole("textbox", { name: "User-Agent" });
@@ -2330,15 +2811,16 @@ describe("App", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /авторизация/i }));
     await userEvent.click(screen.getByLabelText(/использовать вход из браузера/i));
-    await userEvent.click(screen.getByRole("button", { name: /закрыть настройки/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=x");
     await screen.findByText("Example Video");
 
     expect(api.probeUrl).toHaveBeenCalledWith("https://youtube.com/watch?v=x", {
       kind: "browser",
       value: { browser: "chrome", profile: null },
-    });
+    }, expect.any(String));
   });
 
   it("passes analyzed title into the download request", async () => {
@@ -2469,6 +2951,73 @@ describe("App", () => {
       "src",
       "https://i.ytimg.com/running.jpg",
     );
+  });
+
+  it("hides queue and history thumbnails when the preference is off", async () => {
+    const initialSettings = await api.getSettings();
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...initialSettings, showThumbnails: false });
+    vi.mocked(api.getJobs).mockResolvedValueOnce([{
+      id: 62, state: "Running",
+      request: { url: "https://youtube.com/watch?v=running", title: "Running Video", thumbnail: "https://i.ytimg.com/running.jpg", preset: "mp4Video", destinationDir: "D:/Video" },
+    }]);
+    vi.mocked(api.getHistory).mockResolvedValueOnce([{
+      id: "history-62", url: "https://youtube.com/watch?v=done", title: "Done Video", thumbnail: "https://i.ytimg.com/done.jpg", preset: "mp4Video", destinationDir: "D:/Video" , outputPath: "D:/Video/Done Video.mp4",
+    }]);
+    render(<App />);
+    await openQueueSection();
+    const queueTitle = await screen.findByText("Running Video");
+    expect(queueTitle.closest(".job-row")).toHaveAttribute("data-no-thumbnail", "true");
+    expect(screen.queryByRole("img", { name: "Превью загрузки Running Video" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "История" }));
+    const historyTitle = await screen.findByText("Done Video");
+    expect(historyTitle.closest(".history-row")).toHaveAttribute("data-no-thumbnail", "true");
+  });
+
+  it("hides playlist thumbnails from the saved preference and restores them when enabled", async () => {
+    const initialSettings = await api.getSettings();
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...initialSettings, showThumbnails: false });
+    vi.mocked(api.probePlaylist).mockResolvedValueOnce({
+      id: "PL-thumbnails",
+      title: "Thumbnail Playlist",
+      thumbnail: "https://i.ytimg.com/playlist.jpg",
+      entries: [{
+        id: "thumbnail-item",
+        index: 1,
+        url: "https://youtube.com/watch?v=thumbnail-item",
+        title: "Thumbnail Item",
+        thumbnail: "https://i.ytimg.com/item.jpg",
+        duration: 90,
+      }],
+    });
+    vi.mocked(api.probePlaylistItem).mockResolvedValueOnce({ entryId: "thumbnail-item", state: "unavailable" });
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/ссылка на видео/i), {
+      target: { value: "https://youtube.com/playlist?list=PL-thumbnails" },
+    });
+    expect(await screen.findByText("Thumbnail Playlist")).toBeInTheDocument();
+    expect(document.querySelector(".playlist-cover, .playlist-cover-placeholder, .playlist-row-thumbnail, .playlist-row-thumb-placeholder")).toBeNull();
+
+    vi.mocked(api.updateSettings).mockResolvedValueOnce({ ...initialSettings, showThumbnails: true });
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /внешний вид/i }));
+    await userEvent.click(screen.getByRole("switch", { name: "Показывать миниатюры" }));
+    await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ showThumbnails: true }));
+    await userEvent.click(screen.getByRole("button", { name: /^Плейлист$/ }));
+
+    expect(await screen.findByAltText("Thumbnail Playlist")).toHaveAttribute("src", "https://i.ytimg.com/playlist.jpg");
+    expect(screen.getByAltText("Thumbnail Item")).toHaveAttribute("src", "https://i.ytimg.com/item.jpg");
+
+    await userEvent.click(screen.getByRole("button", { name: "Показать список сверху" }));
+    expect(screen.getByAltText("Thumbnail Playlist")).toBeInTheDocument();
+    expect(screen.getByAltText("Thumbnail Item")).toBeInTheDocument();
+
+    vi.mocked(api.updateSettings).mockResolvedValueOnce({ ...initialSettings, showThumbnails: false });
+    await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
+    await userEvent.click(screen.getByRole("tab", { name: /внешний вид/i }));
+    await userEvent.click(screen.getByRole("switch", { name: "Показывать миниатюры" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Плейлист$/ }));
+    expect(document.querySelector(".playlist-cover, .playlist-cover-placeholder, .playlist-row-thumbnail, .playlist-row-thumb-placeholder")).toBeNull();
   });
 
   it("keeps stable order within queue state groups and omits completed jobs", async () => {
@@ -2775,6 +3324,29 @@ describe("App", () => {
     expect(await screen.findByText("Retry Video")).toBeInTheDocument();
     expect(screen.queryByText("Failed Video")).not.toBeInTheDocument();
     expect(screen.getByText("Cancelled Video")).toBeInTheDocument();
+  });
+
+  it("hides the enqueue notice ten seconds after the latest successful download", async () => {
+    render(<App />);
+    await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=notice");
+    const downloadButton = await screen.findByRole("button", { name: /скачать/i });
+    await waitFor(() => expect(downloadButton).toBeEnabled());
+    vi.useFakeTimers();
+    await act(async () => { fireEvent.click(downloadButton); });
+    expect(screen.getByText("Видео добавлено в очередь")).toBeInTheDocument();
+    const countdown = document.querySelector(".single-enqueue-result svg");
+    expect(countdown).toHaveAttribute("aria-hidden", "true");
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    await act(async () => { fireEvent.click(downloadButton); });
+    expect(api.enqueueDownload).toHaveBeenCalledTimes(2);
+    expect(document.querySelector(".single-enqueue-result svg")).not.toBe(countdown);
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(screen.getByText("Видео добавлено в очередь")).toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(4_999));
+    expect(screen.getByText("Видео добавлено в очередь")).toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(screen.queryByText("Видео добавлено в очередь")).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/ссылка на видео/i)).toHaveValue("https://youtube.com/watch?v=notice");
   });
 
   it("allows adding another download while the previous one stays in the queue", async () => {

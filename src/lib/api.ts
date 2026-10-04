@@ -12,11 +12,12 @@ import type {
   SettingsPatch,
   ToolInventory,
   UpdateCheckResult,
+  ComponentId,
+  ComponentUpdateStatus,
   YoutubeAuthStart,
   YoutubeAuthStatus,
   YoutubeAuthWindowState,
   YoutubeWebviewAuthState,
-  BrowserCookie,
   BatchDownloadItem,
   BatchEnqueueResult,
   DownloadFinishedEvent,
@@ -36,6 +37,12 @@ export const api = {
   },
   checkForUpdates() {
     return invoke<UpdateCheckResult>("check_for_updates");
+  },
+  checkComponentUpdates() {
+    return invoke<ComponentUpdateStatus[]>("check_component_updates");
+  },
+  installComponentUpdate(id: ComponentId) {
+    return invoke<string>("install_component_update", { id });
   },
   getDefaultDownloadDir() {
     return invoke<string>("get_default_download_dir");
@@ -60,17 +67,28 @@ export const api = {
     });
     return typeof selected === "string" ? selected : null;
   },
-  probeUrl(url: string, cookieSource?: CookieSource | null) {
-    return invoke<MediaInfo>("probe_url", { url, cookieSource: cookieSource ?? null });
+  probeUrl(url: string, cookieSource: CookieSource | null | undefined, analysisId: string) {
+    return invoke<MediaInfo>("probe_url", { url, cookieSource: cookieSource ?? null, analysisId });
   },
-  probePlaylist(url: string, cookieSource?: CookieSource | null) {
-    return invoke<PlaylistInfo>("probe_playlist", { url, cookieSource: cookieSource ?? null });
+  cancelUrlAnalysis(analysisId: string) {
+    return invoke<void>("cancel_url_analysis", { analysisId });
   },
-  probePlaylistItem(entryId: string, url: string, cookieSource?: CookieSource | null) {
+  probePlaylist(url: string, cookieSource: CookieSource | null | undefined, analysisId: string) {
+    return invoke<PlaylistInfo>("probe_playlist", { url, cookieSource: cookieSource ?? null, analysisId });
+  },
+  beginPlaylistAnalysis(analysisId: string) {
+    return invoke<void>("begin_playlist_analysis", { analysisId });
+  },
+  cancelPlaylistAnalysis(analysisId: string) {
+    return invoke<void>("cancel_playlist_analysis", { analysisId });
+  },
+  probePlaylistItem(entryId: string, url: string, cookieSource: CookieSource | null | undefined, analysisId: string, requestId: string) {
     return invoke<PlaylistItemAnalysis>("probe_playlist_item", {
       entryId,
       url,
       cookieSource: cookieSource ?? null,
+      analysisId,
+      requestId,
     });
   },
   enqueueDownload(request: DownloadRequest) {
@@ -124,8 +142,8 @@ export const api = {
   openExternalUrl(url: string) {
     return invoke<void>("open_external_url", { url });
   },
-  showSystemNotification(title: string, body: string) {
-    return invoke<void>("show_system_notification", { title, body });
+  showSystemNotification(title: string, body: string, sound: boolean) {
+    return invoke<void>("show_system_notification", { title, body, sound });
   },
   getYoutubeAuthStatus() {
     return invoke<YoutubeAuthStatus>("get_youtube_auth_status");
@@ -149,12 +167,6 @@ export const api = {
   },
   getYoutubeAuthWindowState() {
     return invoke<YoutubeAuthWindowState>("get_youtube_auth_window_state");
-  },
-  prepareYoutubeAuthCapture() {
-    return invoke<YoutubeAuthStart>("prepare_youtube_auth_capture");
-  },
-  completeYoutubeAuth(browser: string, cookies: BrowserCookie[]) {
-    return invoke<YoutubeAuthStatus>("complete_youtube_auth", { browser, cookies });
   },
   signOutYoutube() {
     return invoke<YoutubeAuthStatus>("sign_out_youtube");

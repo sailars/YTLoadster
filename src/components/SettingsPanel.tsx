@@ -1,8 +1,12 @@
 import { useEffect, useId, useLayoutEffect, useState } from "react";
 import packageMetadata from "../../package.json";
-import { useI18n, type AppLocale, type Translate } from "../lib/i18n";
+import { useI18n, type AppLocale, type Translate, type TranslationKey } from "../lib/i18n";
+import { api } from "../lib/api";
+import type { ThemePreference } from "../lib/theme";
 import type {
   AppSettings,
+  ComponentId,
+  ComponentUpdateCheckState,
   BrowserAuthSettings,
   PlaylistFormatSelectionMode,
   SettingsPatch,
@@ -17,36 +21,51 @@ type Props = {
   isOpen: boolean;
   settings: BrowserAuthSettings;
   downloadSettings: AppSettings;
+  notificationPending: boolean;
   platform: string;
   locale: AppLocale;
+  theme: ThemePreference;
+  defaultDestinationDir: string | null;
   youtubeAuthStatus: YoutubeAuthStatus;
   youtubeAuthPhase: YoutubeAuthPhase;
   youtubeAuthBrowser: string | null;
   youtubeAuthError: string | null;
   onChange: (settings: BrowserAuthSettings) => void;
-  onDownloadSettingsChange: (patch: SettingsPatch) => void;
+  onDownloadSettingsChange: (patch: SettingsPatch) => Promise<boolean>;
+  onThemeChange: (theme: ThemePreference, trigger: HTMLElement) => void;
   onLocaleChange: (locale: AppLocale) => void;
   onYoutubeLogin: () => void;
   onYoutubeWebviewLogin: () => void;
   onYoutubeLogout: () => void;
   onYoutubeClear: () => void;
   updateCheck: UpdateCheckState;
+  componentUpdates: ComponentUpdateCheckState;
   automaticUpdateChecksEnabled: boolean;
   onCheckForUpdates: () => void;
+  onCheckComponentUpdates: () => void;
+  onInstallComponentUpdate: (id: ComponentId) => void;
   onAutomaticUpdateChecksChange: (enabled: boolean) => void;
   onOpenExternalUrl: (url: string) => void;
   onClose: () => void;
 };
 
-type SettingsTab = "main" | "downloads" | "about";
+type SettingsTab = "main" | "downloads" | "network" | "authorization" | "appearance" | "about";
+const settingsCategories: Array<{ key: SettingsTab; label: TranslationKey }> = [
+  { key: "main", label: "settings.main" },
+  { key: "downloads", label: "settings.downloads" },
+  { key: "network", label: "settings.network" },
+  { key: "authorization", label: "settings.authorization" },
+  { key: "appearance", label: "settings.appearance" },
+  { key: "about", label: "settings.about" },
+];
 type ConnectionRiskKind = "downloads" | "fragments";
 
 const concurrencyOptions = [1, 2, 4, 6, 8];
 const fragmentConcurrencyOptions = [1, 2, 4, 8];
 const defaultRetrySettings = {
-  downloadRetries: 10,
+  downloadRetries: 3,
   fileAccessRetries: 3,
-  fragmentRetries: 10,
+  fragmentRetries: 3,
 };
 const projectUrl = "https://github.com/sailars/YTLoadster";
 const openSourceComponents = [
@@ -54,28 +73,40 @@ const openSourceComponents = [
   { name: "Deno", url: "https://github.com/denoland/deno" },
   { name: "FFmpeg", url: "https://ffmpeg.org/" },
 ];
+const componentNames: Record<ComponentId, string> = {
+  ytdlp: "yt-dlp",
+  deno: "Deno",
+  ffmpeg: "FFmpeg / FFprobe",
+};
 const appIconUrl = new URL("../assets/app-icon.png", import.meta.url).href;
 
 export function SettingsPanel({
   isOpen,
   settings,
   downloadSettings,
+  notificationPending,
   platform,
   locale,
+  theme,
+  defaultDestinationDir,
   youtubeAuthStatus,
   youtubeAuthPhase,
   youtubeAuthBrowser,
   youtubeAuthError,
   onChange,
   onDownloadSettingsChange,
+  onThemeChange,
   onLocaleChange,
   onYoutubeLogin,
   onYoutubeWebviewLogin,
   onYoutubeLogout,
   onYoutubeClear,
   updateCheck,
+  componentUpdates,
   automaticUpdateChecksEnabled,
   onCheckForUpdates,
+  onCheckComponentUpdates,
+  onInstallComponentUpdate,
   onAutomaticUpdateChecksChange,
   onOpenExternalUrl,
   onClose,
@@ -84,10 +115,31 @@ export function SettingsPanel({
   const [activeTab, setActiveTab] = useState<SettingsTab>("main");
   const [youtubeAuthWarningOpen, setYoutubeAuthWarningOpen] = useState(false);
   const [customUserAgentDraft, setCustomUserAgentDraft] = useState(downloadSettings.customUserAgent);
+  const [proxyDraft, setProxyDraft] = useState(() => ({
+    mode: downloadSettings.proxyMode,
+    host: downloadSettings.proxyHost,
+    port: downloadSettings.proxyPort ? String(downloadSettings.proxyPort) : "",
+    username: downloadSettings.proxyUsername,
+    password: "",
+    clearPassword: false,
+  }));
+  const [proxySaveState, setProxySaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
   useEffect(() => {
     setCustomUserAgentDraft(downloadSettings.customUserAgent);
   }, [downloadSettings.customUserAgent]);
+
+  useEffect(() => {
+    setProxyDraft((current) => ({
+      ...current,
+      mode: downloadSettings.proxyMode,
+      host: downloadSettings.proxyHost,
+      port: downloadSettings.proxyPort ? String(downloadSettings.proxyPort) : "",
+      username: downloadSettings.proxyUsername,
+      password: "",
+      clearPassword: false,
+    }));
+  }, [downloadSettings.proxyMode, downloadSettings.proxyHost, downloadSettings.proxyPort, downloadSettings.proxyUsername]);
 
   useLayoutEffect(() => {
     if (isOpen) {
@@ -123,7 +175,7 @@ export function SettingsPanel({
     { value: "opera", label: "Opera" },
     ...(platform === "macos" ? [{ value: "safari", label: "Safari" }] : []),
   ];
-  const youtubeAuthBusy = ["opening", "waiting", "finishing", "capturing"].includes(
+  const youtubeAuthBusy = ["opening", "waiting"].includes(
     youtubeAuthPhase,
   );
   const normalizedCustomUserAgent = customUserAgentDraft.trim();
@@ -133,70 +185,41 @@ export function SettingsPanel({
     t,
   );
   const customUserAgentDirty = normalizedCustomUserAgent !== downloadSettings.customUserAgent;
+  const manualProxy = !["system", "none"].includes(proxyDraft.mode);
+  const proxyPasswordPresent = Boolean(proxyDraft.password || (downloadSettings.proxyPasswordSet && !proxyDraft.clearPassword));
 
   if (!isOpen) {
     return null;
   }
 
   return (
-    <div className="settings-backdrop">
+    <div className="settings-page">
       <section
-        className="settings-dialog"
-        role="dialog"
-        aria-modal="true"
+        className="settings-page-shell"
         aria-label={t("settings.dialog")}
       >
-        <div className="settings-heading">
-          <div className="settings-heading-copy">
-            <SettingsIcon />
-            <div>
-              <h2>{t("settings.dialog")}</h2>
-              <p>{t("settings.subtitle")}</p>
-            </div>
-          </div>
-          <button type="button" className="icon-button secondary settings-close-button" aria-label={t("settings.close")} title={t("settings.close")} onClick={onClose}>
-            <CloseIcon />
-          </button>
-        </div>
-
-        <div className="settings-tabs" role="tablist" aria-label={t("settings.sections")}>
-          <button
-            id="settings-main-tab"
-            type="button"
-            role="tab"
-            aria-controls="settings-main-panel"
-            aria-selected={activeTab === "main"}
-            tabIndex={activeTab === "main" ? 0 : -1}
-            className={`settings-tab${activeTab === "main" ? " selected" : ""}`}
-            onClick={() => setActiveTab("main")}
-          >
-            {t("settings.main")}
-          </button>
-          <button
-            id="settings-downloads-tab"
-            type="button"
-            role="tab"
-            aria-controls="settings-downloads-panel"
-            aria-selected={activeTab === "downloads"}
-            tabIndex={activeTab === "downloads" ? 0 : -1}
-            className={`settings-tab${activeTab === "downloads" ? " selected" : ""}`}
-            onClick={() => setActiveTab("downloads")}
-          >
-            {t("settings.downloads")}
-          </button>
-          <button
-            id="settings-about-tab"
-            type="button"
-            role="tab"
-            aria-controls="settings-about-panel"
-            aria-selected={activeTab === "about"}
-            tabIndex={activeTab === "about" ? 0 : -1}
-            className={`settings-tab${activeTab === "about" ? " selected" : ""}`}
-            onClick={() => setActiveTab("about")}
-          >
-            {t("settings.about")}
-          </button>
-        </div>
+        <header className="settings-page-heading"><h2>{t("settings.dialog")}</h2></header>
+        <div className="settings-page-layout">
+          <nav className="settings-category-nav" role="tablist" aria-label={t("settings.sections")}>
+            {settingsCategories.map(({ key, label }) => (
+              <button
+                key={key}
+                id={`settings-${key}-tab`}
+                type="button"
+                className="settings-category-button"
+                data-active={activeTab === key || undefined}
+                aria-current={activeTab === key ? "page" : undefined}
+                role="tab"
+                aria-controls={`settings-${key}-panel`}
+                aria-selected={activeTab === key}
+                onClick={() => setActiveTab(key)}
+              >
+                <SettingsCategoryIcon kind={key} />
+                <span>{t(label)}</span>
+              </button>
+            ))}
+          </nav>
+          <div className="settings-page-content">
 
         {activeTab === "main" ? (
           <div
@@ -205,75 +228,73 @@ export function SettingsPanel({
             role="tabpanel"
             aria-labelledby="settings-main-tab"
           >
-            <section className="settings-section" aria-labelledby="behavior-settings-title">
-              <h3 id="behavior-settings-title">{t("settings.behavior")}</h3>
-              <div className="settings-toggle-with-help">
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={downloadSettings.preventSystemSleepWhileDownloading}
-                    onChange={(event) => onDownloadSettingsChange({
-                      preventSystemSleepWhileDownloading: event.target.checked,
-                    })}
-                  />
-                  <span>{t("settings.preventSleep")}</span>
-                </label>
-                <span
-                  className="auth-help-icon"
-                  tabIndex={0}
-                  role="img"
-                  aria-label={t("settings.preventSleepHelp")}
-                  data-tooltip={t("settings.preventSleepHelp")}
-                >
-                  ?
-                </span>
+            <section className="settings-section" aria-labelledby="interface-settings-title">
+              <h3 id="interface-settings-title">{t("settings.interface")}</h3>
+              <div className="settings-field settings-language-field">
+                <span>{t("settings.language")}</span>
+                <ParameterSelect
+                  label={t("settings.language")}
+                  value={locale}
+                  onChange={(value) => onLocaleChange(value as AppLocale)}
+                  options={[
+                    { value: "ru", label: t("settings.languageRussian") },
+                    { value: "en", label: t("settings.languageEnglish") },
+                  ]}
+                />
               </div>
-              <div className="settings-toggle-with-help">
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={downloadSettings.minimizeToTray}
-                    onChange={(event) => onDownloadSettingsChange({
-                      minimizeToTray: event.target.checked,
-                    })}
-                  />
-                  <span>{t("settings.minimizeToTray")}</span>
-                </label>
-                <span
-                  className="auth-help-icon"
-                  tabIndex={0}
-                  role="img"
-                  aria-label={t("settings.minimizeToTrayHelp")}
-                  data-tooltip={t("settings.minimizeToTrayHelp")}
-                >
-                  ?
-                </span>
-              </div>
+              <label className="settings-switch-row">
+                <span>{t("settings.completionSound")}</span>
+                <SettingsSwitch role="switch" checked={downloadSettings.completionSoundEnabled}
+                  disabled={notificationPending}
+                  onChange={(checked) => { void onDownloadSettingsChange({ completionSoundEnabled: checked }); }} />
+              </label>
             </section>
-
+            <section className="settings-section" aria-labelledby="behavior-settings-title">
+              <h3 id="behavior-settings-title">{t("settings.system")}</h3>
+              <div className="settings-toggle-with-help">
+                <div className="settings-toggle-copy">
+                  <span>{t("settings.preventSleep")}</span>
+                  <span className="auth-help-icon" tabIndex={0} role="img"
+                    aria-label={t("settings.preventSleepHelp")}
+                    data-tooltip={t("settings.preventSleepHelp")}>?</span>
+                </div>
+                <SettingsSwitch label={t("settings.preventSleep")}
+                  checked={downloadSettings.preventSystemSleepWhileDownloading}
+                  onChange={(checked) => { void onDownloadSettingsChange({ preventSystemSleepWhileDownloading: checked }); }} />
+              </div>
+              <div className="settings-toggle-with-help">
+                <div className="settings-toggle-copy">
+                  <span>{t("settings.minimizeToTray")}</span>
+                  <span className="auth-help-icon" tabIndex={0} role="img"
+                    aria-label={t("settings.minimizeToTrayHelp")}
+                    data-tooltip={t("settings.minimizeToTrayHelp")}>?</span>
+                </div>
+                <SettingsSwitch label={t("settings.minimizeToTray")}
+                  checked={downloadSettings.minimizeToTray}
+                  onChange={(checked) => { void onDownloadSettingsChange({ minimizeToTray: checked }); }} />
+              </div>
+              <label className="settings-switch-row">
+                <span>{t("updates.automatic")}</span>
+                <SettingsSwitch role="switch" checked={automaticUpdateChecksEnabled}
+                  onChange={onAutomaticUpdateChecksChange} />
+              </label>
+            </section>
+          </div>
+        ) : activeTab === "authorization" ? (
+          <div id="settings-authorization-panel" className="settings-panel" role="tabpanel" aria-labelledby="settings-authorization-tab">
             <section className="settings-section" aria-labelledby="auth-settings-title">
               <h3 id="auth-settings-title">{t("settings.authorization")}</h3>
               <div className="browser-cookie-auth-block">
                 <div className="browser-cookie-auth-heading">
-                  <label className="checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={settings.useBrowserCookies}
-                      onChange={(event) =>
-                        onChange({ ...settings, useBrowserCookies: event.target.checked })
-                      }
-                    />
+                  <div className="settings-toggle-copy">
                     <span>{t("settings.browserLogin")}</span>
-                  </label>
-                  <span
-                    className="auth-help-icon"
-                    tabIndex={0}
-                    role="img"
-                    aria-label={t("settings.browserLoginHelp")}
-                    data-tooltip={t("settings.browserLoginHelp")}
-                  >
-                    ?
-                  </span>
+                    <span className="auth-help-icon" tabIndex={0} role="img"
+                      aria-label={t("settings.browserLoginHelp")}
+                      data-tooltip={t("settings.browserLoginHelp")}>?</span>
+                  </div>
+                  <SettingsSwitch label={t("settings.browserLogin")}
+                    checked={settings.useBrowserCookies}
+                    onChange={(checked) => onChange({ ...settings, useBrowserCookies: checked })} />
                 </div>
                 <p className="settings-hint">{t("settings.browserLoginDescription")}</p>
 
@@ -319,10 +340,6 @@ export function SettingsPanel({
                           : t("settings.youtubeAuthWaiting", {
                               browser: youtubeAuthBrowser ?? t("settings.youtubeAuthBrowser"),
                             })
-                        : youtubeAuthPhase === "finishing"
-                          ? t("settings.youtubeAuthFinishing")
-                        : youtubeAuthPhase === "capturing"
-                          ? t("settings.youtubeAuthCapturing")
                         : youtubeAuthPhase === "success"
                           ? t("settings.youtubeAuthSuccess")
                           : youtubeAuthPhase === "cleared"
@@ -373,21 +390,6 @@ export function SettingsPanel({
               </div>
             </section>
 
-            <section className="settings-section" aria-labelledby="interface-settings-title">
-              <h3 id="interface-settings-title">{t("settings.interface")}</h3>
-              <div className="settings-field settings-language-field">
-                <span>{t("settings.language")}</span>
-                <ParameterSelect
-                  label={t("settings.language")}
-                  value={locale}
-                  onChange={(value) => onLocaleChange(value as AppLocale)}
-                  options={[
-                    { value: "ru", label: t("settings.languageRussian") },
-                    { value: "en", label: t("settings.languageEnglish") },
-                  ]}
-                />
-              </div>
-            </section>
           </div>
         ) : activeTab === "downloads" ? (
           <div
@@ -396,8 +398,22 @@ export function SettingsPanel({
             role="tabpanel"
             aria-labelledby="settings-downloads-tab"
           >
+            <section className="settings-section" aria-labelledby="download-location-title">
+              <h3 id="download-location-title">{t("settings.location")}</h3>
+              <div className="settings-field settings-default-folder">
+                <span>{t("settings.defaultFolder")}</span>
+                <div className="settings-path-row">
+                  <input type="text" readOnly value={defaultDestinationDir ?? ""} aria-label={t("settings.defaultFolder")} />
+                  <button type="button" className="secondary" onClick={() => {
+                    void api.selectDownloadDir(defaultDestinationDir).then((selected) => {
+                      if (selected) void onDownloadSettingsChange({ defaultDownloadDir: selected });
+                    });
+                  }}>{t("downloader.browse")}</button>
+                </div>
+              </div>
+            </section>
             <section className="settings-section settings-downloads-section" aria-labelledby="download-settings-title">
-              <h3 id="download-settings-title">{t("settings.downloads")}</h3>
+              <h3 id="download-settings-title">{t("settings.behavior")}</h3>
               <div className="settings-field-grid">
                 <div className="settings-field">
                   <span>{t("settings.concurrent")}</span>
@@ -429,12 +445,31 @@ export function SettingsPanel({
 
             <section className="settings-section settings-file-names-section" aria-labelledby="file-name-settings-title">
               <h3 id="file-name-settings-title">{t("settings.fileNames")}</h3>
+              <div className="settings-field settings-select-row">
+                <span>{t("settings.filenameTemplate")}</span>
+                <ParameterSelect label={t("settings.filenameTemplate")} value={downloadSettings.filenameTemplate}
+                  onChange={(filenameTemplate) => { void onDownloadSettingsChange({ filenameTemplate: filenameTemplate as AppSettings["filenameTemplate"] }); }}
+                  options={[
+                    { value: "title", label: t("settings.templateTitle") },
+                    { value: "title-id", label: t("settings.templateTitleId") },
+                    { value: "channel-title", label: t("settings.templateChannelTitle") },
+                    { value: "date-title", label: t("settings.templateDateTitle") },
+                  ]} />
+              </div>
+              <div className="settings-field settings-select-row">
+                <span>{t("settings.filenameCollision")}</span>
+                <ParameterSelect label={t("settings.filenameCollision")} value={downloadSettings.filenameCollisionPolicy}
+                  onChange={(filenameCollisionPolicy) => { void onDownloadSettingsChange({ filenameCollisionPolicy: filenameCollisionPolicy as AppSettings["filenameCollisionPolicy"] }); }}
+                  options={[
+                    { value: "rename", label: t("settings.collisionRename") },
+                    { value: "replace", label: t("settings.collisionReplace") },
+                  ]} />
+              </div>
               <label className="checkbox-label">
-                <input
-                  type="checkbox"
+                <SettingsSwitch
                   checked={downloadSettings.includeVideoTechnicalDetailsInFilename}
-                  onChange={(event) => onDownloadSettingsChange({
-                    includeVideoTechnicalDetailsInFilename: event.target.checked,
+                  onChange={(checked) => onDownloadSettingsChange({
+                    includeVideoTechnicalDetailsInFilename: checked,
                   })}
                 />
                 <span>{t("settings.videoTechnicalFilename")}</span>
@@ -479,9 +514,14 @@ export function SettingsPanel({
                 <button
                   type="button"
                   className="secondary settings-reset-button"
+                  aria-label={t("settings.restoreDefaults")}
+                  title={t("settings.restoreDefaults")}
                   onClick={() => onDownloadSettingsChange(defaultRetrySettings)}
                 >
-                  {t("settings.restoreDefaults")}
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M3 10a9 9 0 1 1 2.6 8.4" />
+                    <path d="M3 4v6h6" />
+                  </svg>
                 </button>
               </div>
               <div className="settings-field-grid settings-retry-grid">
@@ -509,15 +549,80 @@ export function SettingsPanel({
               </div>
             </section>
 
+          </div>
+        ) : activeTab === "network" ? (
+          <div id="settings-network-panel" className="settings-panel" role="tabpanel" aria-labelledby="settings-network-tab">
+            <section className="settings-section" aria-labelledby="proxy-settings-title">
+              <h3 id="proxy-settings-title">{t("settings.proxy")}</h3>
+              <div className="settings-field settings-proxy-mode">
+                <ParameterSelect label={t("settings.proxy")} value={proxyDraft.mode}
+                  onChange={(mode) => {
+                    const proxyMode = mode as AppSettings["proxyMode"];
+                    setProxyDraft((current) => ({ ...current, mode: proxyMode }));
+                    setProxySaveState("idle");
+                    if (proxyMode === "system" || proxyMode === "none") {
+                      void onDownloadSettingsChange({ proxyMode }).then((saved) => {
+                        if (!saved) {
+                          setProxyDraft((current) => ({ ...current, mode: downloadSettings.proxyMode }));
+                          setProxySaveState("error");
+                        }
+                      });
+                    }
+                  }}
+                  options={[
+                    { value: "system", label: t("settings.proxySystem") },
+                    { value: "none", label: t("settings.proxyNone") },
+                    { value: "http", label: "HTTP" },
+                    { value: "https", label: "HTTPS" },
+                    { value: "socks5", label: "SOCKS5" },
+                  ]} />
+              </div>
+              {manualProxy ? (
+                <div className="settings-proxy-fields">
+                  <label className="settings-field"><span>{t("settings.proxyHost")}</span>
+                    <input type="text" value={proxyDraft.host} autoComplete="off" onChange={(event) => setProxyDraft((current) => ({ ...current, host: event.target.value }))} /></label>
+                  <label className="settings-field"><span>{t("settings.proxyPort")}</span>
+                    <input type="number" min={1} max={65535} value={proxyDraft.port} onChange={(event) => setProxyDraft((current) => ({ ...current, port: event.target.value }))} /></label>
+                  <label className="settings-field"><span>{t("settings.proxyUsername")}</span>
+                    <input type="text" value={proxyDraft.username} autoComplete="off" onChange={(event) => setProxyDraft((current) => ({ ...current, username: event.target.value }))} /></label>
+                  <label className="settings-field"><span>{t("settings.proxyPassword")}</span>
+                    <input type="password" value={proxyDraft.password} autoComplete="new-password"
+                      placeholder={downloadSettings.proxyPasswordSet && !proxyDraft.clearPassword ? t("settings.proxyPasswordSaved") : ""}
+                      onChange={(event) => setProxyDraft((current) => ({ ...current, password: event.target.value, clearPassword: false }))} /></label>
+                  {downloadSettings.proxyPasswordSet ? <button type="button" className="secondary settings-proxy-clear"
+                    onClick={() => setProxyDraft((current) => ({ ...current, password: "", clearPassword: true }))}>
+                    {t("settings.proxyClearPassword")}
+                  </button> : null}
+                </div>
+              ) : null}
+              {manualProxy ? <div className="settings-proxy-actions">
+                <button type="button" className="primary" disabled={proxySaveState === "saving" ||
+                  !proxyDraft.host.trim() || !Number.isInteger(Number(proxyDraft.port)) || Number(proxyDraft.port) < 1 || Number(proxyDraft.port) > 65535 || (proxyPasswordPresent && !proxyDraft.username.trim())}
+                  onClick={() => {
+                    setProxySaveState("saving");
+                    void onDownloadSettingsChange({
+                      proxyMode: proxyDraft.mode,
+                      proxyHost: proxyDraft.host.trim(),
+                      proxyPort: Number(proxyDraft.port) || 0,
+                      proxyUsername: proxyDraft.username.trim(),
+                      ...(proxyDraft.password || proxyDraft.clearPassword ? { proxyPassword: proxyDraft.password } : {}),
+                    }).then((saved) => setProxySaveState(saved ? "saved" : "error"));
+                  }}>{t("common.save")}</button>
+                <span role="status" className="settings-proxy-status">
+                  {proxySaveState === "saved" ? t("settings.proxySaved") : proxySaveState === "error" ? t("settings.proxySaveError") : ""}
+                </span>
+              </div> : proxySaveState === "error" ? (
+                <p className="settings-proxy-error" role="alert">{t("settings.proxySaveError")}</p>
+              ) : null}
+            </section>
             <section className="settings-section settings-user-agent-section" aria-labelledby="user-agent-settings-title">
               <h3 id="user-agent-settings-title">{t("settings.userAgent")}</h3>
               <label className="checkbox-label">
-                <input
-                  type="checkbox"
+                <SettingsSwitch
                   checked={downloadSettings.customUserAgentEnabled}
                   disabled={!downloadSettings.customUserAgentEnabled && Boolean(validateCustomUserAgent(customUserAgentDraft, true, t))}
-                  onChange={(event) => {
-                    if (event.target.checked) {
+                  onChange={(checked) => {
+                    if (checked) {
                       onDownloadSettingsChange({
                         customUserAgentEnabled: true,
                         customUserAgent: normalizedCustomUserAgent,
@@ -559,6 +664,39 @@ export function SettingsPanel({
               >
                 {customUserAgentError ?? "\u00a0"}
               </p>
+            </section>
+          </div>
+        ) : activeTab === "appearance" ? (
+          <div id="settings-appearance-panel" className="settings-panel" role="tabpanel" aria-labelledby="settings-appearance-tab">
+            <section className="settings-section" aria-labelledby="appearance-theme-title">
+              <h3 id="appearance-theme-title">{t("settings.appearance")}</h3>
+              <div className="settings-theme-field">
+                <span>{t("settings.theme")}</span>
+                <div className="settings-theme-choices" role="group" aria-label={t("settings.theme")}>
+                  {(["light", "dark", "system"] as const).map((option) => (
+                    <button key={option} type="button" aria-pressed={theme === option}
+                      onClick={(event) => onThemeChange(option, event.currentTarget)}>
+                      <SettingsThemeIcon theme={option} />
+                      <span>{t(option === "light" ? "settings.themeLight" : option === "dark" ? "settings.themeDark" : "settings.themeSystem")}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="settings-accent-row">
+                <span>{t("settings.accentColor")}</span>
+                <div className="settings-accent-options" role="group" aria-label={t("settings.accentColor")}>
+                  {(["blue", "purple", "cyan", "green", "orange", "pink"] as const).map((color) => (
+                    <button key={color} type="button" className="settings-accent-swatch" data-color={color}
+                      aria-label={t(`settings.accent.${color}`)} aria-pressed={downloadSettings.accentColor === color}
+                      onClick={() => { void onDownloadSettingsChange({ accentColor: color }); }} />
+                  ))}
+                </div>
+              </div>
+              <label className="settings-switch-row">
+                <span>{t("settings.showThumbnails")}</span>
+                <SettingsSwitch role="switch" checked={downloadSettings.showThumbnails}
+                  onChange={(checked) => { void onDownloadSettingsChange({ showThumbnails: checked }); }} />
+              </label>
             </section>
           </div>
         ) : (
@@ -603,20 +741,6 @@ export function SettingsPanel({
                     : t("updates.checkAction")}
                 </button>
               </div>
-              <label className="about-update-toggle">
-                <span className="about-update-toggle-label">
-                  {t("updates.automatic")}
-                </span>
-                <input
-                  type="checkbox"
-                  role="switch"
-                  checked={automaticUpdateChecksEnabled}
-                  onChange={(event) =>
-                    onAutomaticUpdateChecksChange(event.target.checked)
-                  }
-                />
-                <span className="about-update-toggle-control" aria-hidden="true" />
-              </label>
               <p
                 className="about-update-status"
                 data-state={updateCheck.status}
@@ -634,6 +758,68 @@ export function SettingsPanel({
                   {t("updates.openRelease")}
                 </button>
               ) : null}
+            </section>
+            <section className="about-update component-updates" aria-labelledby="component-updates-title">
+              <div className="about-update-heading">
+                <h3 id="component-updates-title">{t("components.title")}</h3>
+                <button
+                  type="button"
+                  className="secondary about-update-check"
+                  disabled={componentUpdates.status === "checking" || componentUpdates.installingId !== null}
+                  onClick={onCheckComponentUpdates}
+                >
+                  {componentUpdates.status === "checking" ? t("components.checkingAction") : t("components.checkAction")}
+                </button>
+              </div>
+              {componentUpdates.status !== "ready" ? (
+                <p className="about-update-status" role="status" aria-live="polite">
+                  {componentUpdates.status === "checking" ? t("components.checking")
+                    : componentUpdates.status === "error" ? t("components.checkError")
+                      : t("components.notChecked")}
+                </p>
+              ) : (
+                <ul className="component-update-list">
+                  {componentUpdates.results.map((component) => (
+                    <li key={component.id} className="component-update-row">
+                      <div className="component-update-copy">
+                        <strong>{componentNames[component.id]}</strong>
+                        <span>{component.currentVersion
+                          ? t("components.current", { version: component.currentVersion })
+                          : t("components.missing")}</span>
+                        <span>
+                          {component.state === "newerRelease" ? t("components.newerRelease", { latest: component.latestVersion ?? "" })
+                            : component.state === "notPublished" ? t("components.notPublished")
+                            : component.state === "unavailable" ? t("components.unavailable")
+                            : component.state === "upToDate" ? t("components.upToDate")
+                              : t("components.available", { latest: component.latestVersion ?? "" })}
+                        </span>
+                        {component.sourceUrl ? (
+                          <a
+                            className="component-update-source"
+                            href={component.sourceUrl}
+                            onClick={(event) => openExternalLink(event, component.sourceUrl!, onOpenExternalUrl)}
+                          >
+                            {t("components.releasePage")}
+                          </a>
+                        ) : null}
+                        {componentUpdates.installErrorId === component.id ? (
+                          <span className="component-update-error" role="alert">{t("components.installError")}</span>
+                        ) : null}
+                      </div>
+                      {component.state === "available" ? (
+                        <button
+                          type="button"
+                          className="secondary component-update-install"
+                          disabled={componentUpdates.installingId !== null}
+                          onClick={() => onInstallComponentUpdate(component.id)}
+                        >
+                          {componentUpdates.installingId === component.id ? t("components.installing") : t("components.install")}
+                        </button>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </section>
             <section className="about-components" aria-labelledby="about-components-title">
               <h3 id="about-components-title">{t("settings.openSource")}</h3>
@@ -653,6 +839,8 @@ export function SettingsPanel({
             </section>
           </div>
         )}
+          </div>
+        </div>
       </section>
 
       {youtubeAuthWarningOpen ? (
@@ -826,26 +1014,60 @@ function connectionRisk(value: number, kind: ConnectionRiskKind, t: Translate): 
   return { level: "high", label: t("risk.high") };
 }
 
+function SettingsSwitch({ checked, onChange, disabled = false, label, role }: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  label?: string;
+  role?: "switch";
+}) {
+  return (
+    <span className="settings-switch-control">
+      <input type="checkbox" role={role} aria-label={label} checked={checked} disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)} />
+      <span className="settings-switch-track" aria-hidden="true" />
+    </span>
+  );
+}
+
 function SettingsIcon() {
   return (
     <svg className="outline-icon" aria-hidden="true" viewBox="0 0 24 24" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3.5" y="4" width="17" height="16" rx="2.25" />
-      <path d="M7 9h3" />
-      <path d="M14 9h3" />
-      <path d="M7 15h3" />
-      <path d="M14 15h3" />
-      <circle cx="11.75" cy="9" r="1.25" fill="currentColor" stroke="none" />
-      <circle cx="12.25" cy="15" r="1.25" fill="currentColor" stroke="none" />
+      <path d="M3 5h7m4 0h7M3 12h3m4 0h11M3 19h11m4 0h3" />
+      <circle cx="12" cy="5" r="2" />
+      <circle cx="8" cy="12" r="2" />
+      <circle cx="16" cy="19" r="2" />
     </svg>
   );
 }
 
-function CloseIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-      <path d="M7 7l10 10M17 7 7 17" />
+function SettingsCategoryIcon({ kind }: { kind: SettingsTab }) {
+  if (kind === "main") return <SettingsIcon />;
+  if (kind === "appearance") return (
+    <svg className="outline-icon" aria-hidden="true" viewBox="0 0 24 24" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3a9 9 0 1 0 0 18h1.4a2.2 2.2 0 0 0 1.7-3.6 2.2 2.2 0 0 1 1.7-3.6H19a2 2 0 0 0 2-2A9 9 0 0 0 12 3Z" />
+      <circle cx="7.5" cy="12" r=".8" fill="currentColor" stroke="none" />
+      <circle cx="9.5" cy="8" r=".8" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="7.5" r=".8" fill="currentColor" stroke="none" />
+      <circle cx="17" cy="10.5" r=".8" fill="currentColor" stroke="none" />
     </svg>
   );
+  const paths: Record<Exclude<SettingsTab, "main" | "appearance">, string> = {
+    downloads: "M12 3v11m0 0 4-4m-4 4-4-4M4 17v3h16v-3",
+    network: "M3 12h18M12 3a16 16 0 0 1 0 18M12 3a16 16 0 0 0 0 18M12 3a9 9 0 0 0 0 18M3 12a9 9 0 0 1 18 0 9 9 0 0 1-18 0",
+    authorization: "M5 10V7a7 7 0 0 1 14 0v3M4 10h16v11H4zM12 14v3",
+    about: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 8v6m0-9h.01",
+  };
+  return <svg className="outline-icon" aria-hidden="true" viewBox="0 0 24 24" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d={paths[kind]} /></svg>;
+}
+
+function SettingsThemeIcon({ theme }: { theme: ThemePreference }) {
+  const path = theme === "light"
+    ? "M12 3v2m0 14v2M3 12h2m14 0h2M5.64 5.64l1.42 1.42m9.88 9.88 1.42 1.42M18.36 5.64l-1.42 1.42M7.06 16.94l-1.42 1.42M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"
+    : theme === "dark"
+      ? "M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2Z"
+      : "M3 5h18v12H3zM8 21h8m-4-4v4";
+  return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d={path} /></svg>;
 }
 
 function YoutubeAuthNoticeIcon() {

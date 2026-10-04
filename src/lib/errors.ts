@@ -20,6 +20,15 @@ export function isYouTubeRateLimitError(message: string) {
   );
 }
 
+export function isYouTubeForbiddenError(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("http error 403") ||
+    normalized.includes("403: forbidden") ||
+    normalized.includes("ошибка 403")
+  );
+}
+
 export function isYouTubeAgeRestrictionError(message: string) {
   const normalized = message.toLowerCase();
   return (

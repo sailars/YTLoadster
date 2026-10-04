@@ -1,11 +1,13 @@
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 #[cfg(target_os = "windows")]
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,8 +15,6 @@ use tauri::{AppHandle, Manager, State};
 #[cfg(target_os = "windows")]
 use tauri::{Url, WebviewUrl, WebviewWindowBuilder};
 
-#[cfg(target_os = "windows")]
-use rusqlite::{Connection, OpenFlags};
 #[cfg(target_os = "macos")]
 use security_framework::os::macos::keychain::SecKeychain;
 #[cfg(target_os = "windows")]
@@ -57,7 +57,6 @@ pub struct YoutubeAuthStatus {
 #[serde(rename_all = "camelCase")]
 pub struct YoutubeAuthStart {
     pub browser: String,
-    pub websocket_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +64,7 @@ pub struct YoutubeAuthStart {
 pub struct YoutubeAuthWindowState {
     pub open: bool,
     pub session_detected: bool,
+    pub status: YoutubeAuthStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,7 +74,7 @@ pub struct YoutubeWebviewAuthState {
     pub authenticated: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserCookie {
     name: String,
@@ -95,7 +95,8 @@ struct SessionMetadata {
 #[derive(Debug)]
 struct ActiveAuth {
     browser_name: String,
-    browser_executable: PathBuf,
+    websocket_url: String,
+    cookie_fingerprint: Option<[u8; 32]>,
     profile_dir: PathBuf,
     child: std::process::Child,
     window_seen: bool,
@@ -104,6 +105,22 @@ struct ActiveAuth {
 #[derive(Debug, Default)]
 pub struct YoutubeAuthManager {
     active: Mutex<Option<ActiveAuth>>,
+    refresh: tokio::sync::Mutex<()>,
+    completed: AtomicBool,
+}
+
+impl YoutubeAuthManager {
+    pub fn shutdown(&self) {
+        self.completed.store(false, Ordering::Relaxed);
+        if let Some(active) = self
+            .active
+            .lock()
+            .expect("youtube auth mutex poisoned")
+            .take()
+        {
+            stop_and_remove_auth_attempt(active);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +156,7 @@ pub fn cancel_youtube_auth(
     app: AppHandle,
     manager: State<'_, YoutubeAuthManager>,
 ) -> YoutubeAuthStatus {
+    manager.completed.store(false, Ordering::Relaxed);
     if let Some(active) = manager
         .active
         .lock()
@@ -151,45 +169,11 @@ pub fn cancel_youtube_auth(
 }
 
 #[tauri::command]
-pub fn get_youtube_auth_window_state(
+pub async fn get_youtube_auth_window_state(
+    app: AppHandle,
     manager: State<'_, YoutubeAuthManager>,
 ) -> Result<YoutubeAuthWindowState, String> {
-    let mut active = manager.active.lock().expect("youtube auth mutex poisoned");
-    let Some(active) = active.as_mut() else {
-        return Ok(YoutubeAuthWindowState {
-            open: false,
-            session_detected: false,
-        });
-    };
-    let root_process_running = active
-        .child
-        .try_wait()
-        .map(|status| status.is_none())
-        .map_err(|error| format!("Не удалось проверить окно авторизации: {error}"))?;
-
-    #[cfg(target_os = "windows")]
-    let (session_detected, is_open) = {
-        let root_process_id = active.child.id();
-        let visible_window = browser_process_tree_has_visible_window(root_process_id);
-        active.window_seen |= visible_window;
-        let process_tree_running = browser_process_tree_is_running(root_process_id);
-        let is_open = auth_window_is_open(
-            active.window_seen,
-            root_process_running,
-            process_tree_running,
-            visible_window,
-        );
-        (profile_has_youtube_session(&active.profile_dir), is_open)
-    };
-    #[cfg(target_os = "macos")]
-    let (session_detected, is_open) = (false, root_process_running);
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let (session_detected, is_open) = (false, root_process_running);
-
-    Ok(YoutubeAuthWindowState {
-        open: is_open,
-        session_detected,
-    })
+    refresh_youtube_auth_session(&app, &manager).await
 }
 
 #[tauri::command]
@@ -208,6 +192,7 @@ pub async fn start_youtube_auth(
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
+        manager.completed.store(false, Ordering::Relaxed);
         let browser = choose_browser(preferred_browser.as_deref()).ok_or_else(|| {
             "Не найден поддерживаемый Chromium-браузер. Установите Edge, Chrome, Brave, Vivaldi или Opera и повторите попытку."
                 .to_string()
@@ -225,37 +210,53 @@ pub async fn start_youtube_auth(
             stop_and_remove_auth_attempt(previous);
         }
 
-        let mut command = Command::new(&browser.executable);
-        #[cfg(target_os = "macos")]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        command
-            .arg(format!("--user-data-dir={}", profile_dir.to_string_lossy()))
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
-            .arg("--disable-background-mode")
-            .arg("--new-window")
-            .arg(YOUTUBE_LOGIN_URL)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        let debugger_port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .and_then(|listener| listener.local_addr().map(|address| address.port()))
+            .map_err(|_| "youtube-auth-connection-failed".to_string())?;
+        let mut command = auth_browser_command(&browser.executable, &profile_dir, debugger_port);
+        command.arg(YOUTUBE_LOGIN_URL);
         let child = command
             .spawn()
             .map_err(|error| format!("Не удалось открыть {}: {error}", browser.name))?;
 
-        *manager.active.lock().expect("youtube auth mutex poisoned") = Some(ActiveAuth {
+        let active = ActiveAuth {
             browser_name: browser.name.to_string(),
-            browser_executable: browser.executable,
+            websocket_url: String::new(),
+            cookie_fingerprint: None,
             profile_dir,
             child,
             window_seen: false,
-        });
+        };
+        let attempt_profile = active.profile_dir.clone();
+        *manager.active.lock().expect("youtube auth mutex poisoned") = Some(active);
+        // Register the child before awaiting CDP so cancel/exit can stop a starting browser.
+        let connection = wait_for_live_debugger_url(debugger_port).await;
+        let failed_attempt = {
+            let mut guard = manager.active.lock().expect("youtube auth mutex poisoned");
+            let Some(active) = guard
+                .as_mut()
+                .filter(|active| active.profile_dir == attempt_profile)
+            else {
+                return Err("youtube-auth-cancelled".to_string());
+            };
+            match &connection {
+                Ok(url) => {
+                    active.websocket_url = url.clone();
+                    None
+                }
+                Err(_) => guard.take(),
+            }
+        };
+        if let Err(error) = connection {
+            if let Some(active) = failed_attempt {
+                stop_and_remove_auth_attempt(active);
+            }
+            return Err(error);
+        }
+        monitor_youtube_auth_session(app, attempt_profile);
 
         Ok(YoutubeAuthStart {
             browser: browser.name.to_string(),
-            websocket_url: None,
         })
     }
 }
@@ -278,7 +279,6 @@ pub async fn start_youtube_webview_auth(app: AppHandle) -> Result<YoutubeAuthSta
             let _ = window.set_focus();
             return Ok(YoutubeAuthStart {
                 browser: WEBVIEW_AUTH_BROWSER_NAME.to_string(),
-                websocket_url: None,
             });
         }
 
@@ -306,7 +306,6 @@ pub async fn start_youtube_webview_auth(app: AppHandle) -> Result<YoutubeAuthSta
 
         Ok(YoutubeAuthStart {
             browser: WEBVIEW_AUTH_BROWSER_NAME.to_string(),
-            websocket_url: None,
         })
     }
 }
@@ -380,146 +379,6 @@ pub async fn cancel_youtube_webview_auth(app: AppHandle) -> Result<YoutubeAuthSt
 }
 
 #[tauri::command]
-pub async fn prepare_youtube_auth_capture(
-    manager: State<'_, YoutubeAuthManager>,
-) -> Result<YoutubeAuthStart, String> {
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        let _ = manager;
-        return Err(
-            "Автоматический вход в YouTube пока поддерживается только в Windows.".to_string(),
-        );
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    {
-        let mut active = manager
-            .active
-            .lock()
-            .expect("youtube auth mutex poisoned")
-            .take()
-            .ok_or_else(|| "Сеанс входа не запущен.".to_string())?;
-        if active
-            .child
-            .try_wait()
-            .map_err(|error| format!("Не удалось проверить окно авторизации: {error}"))?
-            .is_none()
-        {
-            #[cfg(target_os = "windows")]
-            {
-                request_browser_window_close(active.child.id());
-                tokio::time::sleep(Duration::from_millis(800)).await;
-                terminate_browser_process_tree(active.child.id());
-            }
-            #[cfg(target_os = "macos")]
-            terminate_macos_auth_browser_group(active.child.id());
-            let _ = active.child.kill();
-            let _ = active.child.wait();
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            terminate_browser_process_descendants(active.child.id());
-            wait_for_browser_process_descendants(active.child.id(), Duration::from_secs(5)).await;
-        }
-        let active_port_file = active.profile_dir.join("DevToolsActivePort");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let mut websocket_url = None;
-        for attempt in 0..2 {
-            let _ = fs::remove_file(&active_port_file);
-            let mut command = Command::new(&active.browser_executable);
-            command
-                .arg(format!(
-                    "--user-data-dir={}",
-                    active.profile_dir.to_string_lossy()
-                ))
-                .arg("--headless=new")
-                .arg("--remote-debugging-port=0")
-                .arg("--remote-allow-origins=*")
-                .arg("--disable-background-mode")
-                .arg("--no-first-run")
-                .arg("about:blank")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            active.child = command.spawn().map_err(|error| {
-                format!(
-                    "Не удалось проверить вход через {}: {error}",
-                    active.browser_name
-                )
-            })?;
-
-            if let Ok(url) = wait_for_debugger_url(&active_port_file).await {
-                websocket_url = Some(url);
-                break;
-            }
-            let _ = active.child.kill();
-            let _ = active.child.wait();
-            if attempt == 0 {
-                tokio::time::sleep(Duration::from_millis(1_000)).await;
-            } else {
-                let _ = active.child.kill();
-                return Err("Не удалось завершить настройку входа. Закройте отдельное окно браузера, очистите данные входа и повторите попытку.".to_string());
-            }
-        }
-        let websocket_url = websocket_url.ok_or_else(|| {
-            "Не удалось завершить настройку входа. Очистите данные входа и повторите попытку."
-                .to_string()
-        })?;
-        let browser = active.browser_name.clone();
-        *manager.active.lock().expect("youtube auth mutex poisoned") = Some(active);
-        Ok(YoutubeAuthStart {
-            browser,
-            websocket_url: Some(websocket_url),
-        })
-    }
-}
-
-#[tauri::command]
-pub fn complete_youtube_auth(
-    browser: String,
-    cookies: Vec<BrowserCookie>,
-    app: AppHandle,
-    manager: State<'_, YoutubeAuthManager>,
-) -> Result<YoutubeAuthStatus, String> {
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        let _ = (browser, cookies, app, manager);
-        return Err(
-            "Автоматический вход в YouTube пока поддерживается только в Windows.".to_string(),
-        );
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    {
-        let browser_name = manager
-            .active
-            .lock()
-            .expect("youtube auth mutex poisoned")
-            .as_ref()
-            .map(|active| active.browser_name.clone())
-            .ok_or_else(|| "Сеанс входа не запущен.".to_string())?;
-        if !browser_name.eq_ignore_ascii_case(browser.trim()) {
-            return Err(
-                "Открытое окно авторизации не соответствует выбранному браузеру.".to_string(),
-            );
-        }
-
-        save_youtube_session(&app, &browser_name, &cookies)?;
-        if let Some(active) = manager
-            .active
-            .lock()
-            .expect("youtube auth mutex poisoned")
-            .take()
-        {
-            stop_and_remove_auth_attempt(active);
-        }
-
-        Ok(youtube_auth_status(&app))
-    }
-}
-
-#[tauri::command]
 pub fn sign_out_youtube(
     app: AppHandle,
     manager: State<'_, YoutubeAuthManager>,
@@ -539,6 +398,7 @@ fn clear_youtube_auth_data(
     app: &AppHandle,
     manager: &YoutubeAuthManager,
 ) -> Result<YoutubeAuthStatus, String> {
+    manager.completed.store(false, Ordering::Relaxed);
     if let Some(active) = manager
         .active
         .lock()
@@ -587,7 +447,12 @@ fn remove_directory_with_retry(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn materialize_youtube_cookies(app: &AppHandle) -> Result<TemporaryCookieFile, String> {
+pub async fn materialize_youtube_cookies(app: &AppHandle) -> Result<TemporaryCookieFile, String> {
+    let manager = app.state::<YoutubeAuthManager>();
+    let state = refresh_youtube_auth_session(app, &manager).await?;
+    if state.open && !state.session_detected {
+        return Err("youtube-auth-session-unavailable".to_string());
+    }
     #[cfg(target_os = "macos")]
     {
         return materialize_youtube_cookie_file(app, macos_read_youtube_session()?);
@@ -738,6 +603,244 @@ fn unique_auth_profile_dir(root: &Path, browser_id: &str) -> PathBuf {
     ))
 }
 
+fn monitor_youtube_auth_session(app: AppHandle, profile: PathBuf) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let manager = app.state::<YoutubeAuthManager>();
+            if !manager
+                .active
+                .lock()
+                .expect("youtube auth mutex poisoned")
+                .as_ref()
+                .is_some_and(|active| active.profile_dir == profile)
+            {
+                break;
+            }
+            let _ = refresh_youtube_auth_session(&app, &manager).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn auth_browser_command(executable: &Path, profile: &Path, debugger_port: u16) -> Command {
+    let mut command = Command::new(executable);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+        .arg(format!("--remote-debugging-port={debugger_port}"))
+        .arg("--remote-debugging-address=127.0.0.1")
+        .arg(format!("--user-data-dir={}", profile.to_string_lossy()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-background-mode")
+        .arg("--new-window")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+async fn refresh_youtube_auth_session(
+    app: &AppHandle,
+    manager: &YoutubeAuthManager,
+) -> Result<YoutubeAuthWindowState, String> {
+    // Polling and queued jobs must never overwrite a newer cookie snapshot.
+    let _refresh = manager.refresh.lock().await;
+    let capture = manager
+        .active
+        .lock()
+        .expect("youtube auth mutex poisoned")
+        .as_ref()
+        .map(|active| (active.profile_dir.clone(), active.websocket_url.clone()));
+    let Some((profile, websocket_url)) = capture else {
+        let status = youtube_auth_status(app);
+        return Ok(YoutubeAuthWindowState {
+            open: false,
+            session_detected: manager.completed.load(Ordering::Relaxed) && status.authenticated,
+            status,
+        });
+    };
+    let snapshot = read_live_browser_snapshot(&websocket_url).await;
+    let (open, session_detected, closed_attempt) = {
+        let mut guard = manager.active.lock().expect("youtube auth mutex poisoned");
+        let Some(active) = guard
+            .as_mut()
+            .filter(|active| active.profile_dir == profile)
+        else {
+            // Sign-out or a new attempt happened while CDP was reading cookies.
+            return Ok(YoutubeAuthWindowState {
+                open: false,
+                session_detected: false,
+                status: youtube_auth_status(app),
+            });
+        };
+        let (open, session_detected) = match snapshot {
+            Ok(snapshot) => {
+                let browser_name = active.browser_name.clone();
+                let authenticated = update_live_youtube_session(
+                    &mut active.cookie_fingerprint,
+                    &snapshot.cookies,
+                    |cookies| save_youtube_session(app, &browser_name, cookies),
+                    || remove_saved_youtube_session(app),
+                )?;
+                active.window_seen |= snapshot.open;
+                (snapshot.open, authenticated)
+            }
+            Err(_) => {
+                if auth_process_window_is_open(active)? {
+                    return Err("youtube-auth-refresh-failed".to_string());
+                }
+                // Cmd+Q may close CDP before its final response. Keep the last protected snapshot.
+                (false, active.cookie_fingerprint.is_some())
+            }
+        };
+        let closed_attempt = if open {
+            None
+        } else {
+            manager.completed.store(session_detected, Ordering::Relaxed);
+            guard.take()
+        };
+        (open, session_detected, closed_attempt)
+    };
+    if let Some(active) = closed_attempt {
+        let _ = tokio::task::spawn_blocking(move || stop_and_remove_auth_attempt(active)).await;
+    }
+    Ok(YoutubeAuthWindowState {
+        open,
+        session_detected,
+        status: youtube_auth_status(app),
+    })
+}
+
+fn update_live_youtube_session(
+    fingerprint: &mut Option<[u8; 32]>,
+    cookies: &[BrowserCookie],
+    save: impl FnOnce(&[BrowserCookie]) -> Result<(), String>,
+    clear: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    if !youtube_cookie_set_is_authenticated(cookies) {
+        if fingerprint.is_some() {
+            clear()?;
+            *fingerprint = None;
+        }
+        return Ok(false);
+    }
+    let next: [u8; 32] = Sha256::digest(serialize_youtube_cookies(cookies)?.as_bytes()).into();
+    if fingerprint.as_ref() != Some(&next) {
+        save(cookies)?;
+        *fingerprint = Some(next);
+    }
+    Ok(true)
+}
+
+struct LiveBrowserSnapshot {
+    cookies: Vec<BrowserCookie>,
+    open: bool,
+}
+
+async fn read_live_browser_snapshot(websocket_url: &str) -> Result<LiveBrowserSnapshot, String> {
+    use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
+    let error = || "youtube-auth-refresh-failed".to_string();
+    let port = url::Url::parse(websocket_url)
+        .ok()
+        .and_then(|url| url.port());
+    if !port.is_some_and(|port| live_debugger_url_matches_port(websocket_url, port)) {
+        return Err(error());
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(4 * 1024 * 1024))
+            .max_frame_size(Some(4 * 1024 * 1024));
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async_with_config(websocket_url, Some(config), false)
+                .await
+                .map_err(|_| error())?;
+        let mut cookies = None;
+        let mut open = None;
+        for (id, method) in [(1, "Storage.getCookies"), (2, "Target.getTargets")] {
+            socket
+                .send(Message::Text(
+                    serde_json::json!({"id": id, "method": method})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .map_err(|_| error())?;
+            loop {
+                let message = socket
+                    .next()
+                    .await
+                    .ok_or_else(error)?
+                    .map_err(|_| error())?;
+                match message {
+                    Message::Text(text) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(&text).map_err(|_| error())?;
+                        if value["id"].as_u64() != Some(id) {
+                            continue;
+                        }
+                        if value.get("error").is_some() {
+                            return Err(error());
+                        }
+                        if id == 1 {
+                            let all: Vec<BrowserCookie> =
+                                serde_json::from_value(value["result"]["cookies"].clone())
+                                    .map_err(|_| error())?;
+                            cookies = Some(
+                                all.into_iter()
+                                    .filter(|cookie| is_youtube_domain(&cookie.domain))
+                                    .collect(),
+                            );
+                        } else {
+                            let targets = value["result"]["targetInfos"]
+                                .as_array()
+                                .ok_or_else(error)?;
+                            open = Some(targets.iter().any(|target| target["type"] == "page"));
+                        }
+                        break;
+                    }
+                    Message::Close(_) => return Err(error()),
+                    _ => {}
+                }
+            }
+        }
+        let _ = socket.close(None).await;
+        Ok(LiveBrowserSnapshot {
+            cookies: cookies.ok_or_else(error)?,
+            open: open.ok_or_else(error)?,
+        })
+    })
+    .await
+    .map_err(|_| error())?
+}
+
+fn auth_process_window_is_open(active: &mut ActiveAuth) -> Result<bool, String> {
+    let root_running = active
+        .child
+        .try_wait()
+        .map(|status| status.is_none())
+        .map_err(|_| "youtube-auth-refresh-failed".to_string())?;
+    #[cfg(target_os = "windows")]
+    {
+        let visible = browser_process_tree_has_visible_window(active.child.id());
+        active.window_seen |= visible;
+        Ok(auth_window_is_open(
+            active.window_seen,
+            root_running,
+            browser_process_tree_is_running(active.child.id()),
+            visible,
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(root_running)
+    }
+}
+
 fn auth_window_is_open(
     window_seen: bool,
     root_process_running: bool,
@@ -781,37 +884,57 @@ fn terminate_macos_auth_browser_group(process_id: u32) {
         .status();
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-async fn wait_for_debugger_url(active_port_file: &Path) -> Result<String, String> {
-    for _ in 0..100 {
-        if let Ok(value) = fs::read_to_string(active_port_file) {
-            let mut lines = value.lines();
-            if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
-                if port.chars().all(|character| character.is_ascii_digit())
-                    && path.starts_with("/devtools/browser/")
-                {
-                    return Ok(format!("ws://127.0.0.1:{port}{path}"));
+async fn wait_for_live_debugger_url(port: u16) -> Result<String, String> {
+    let error = || "youtube-auth-connection-failed".to_string();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_millis(500))
+        .build()
+        .map_err(|_| error())?;
+    let endpoint = format!("http://127.0.0.1:{port}/json/version");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(response) = client.get(&endpoint).send().await {
+                if response.status().is_success() {
+                    if let Ok(bytes) = response.bytes().await {
+                        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                            if let Some(url) = value["webSocketDebuggerUrl"].as_str() {
+                                if live_debugger_url_matches_port(url, port) {
+                                    return url.to_string();
+                                }
+                            }
+                        }
+                    }
                 }
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    Err("Браузер открылся, но программа не смогла подключиться к окну авторизации.".to_string())
+    })
+    .await
+    .map_err(|_| error())
+}
+
+fn live_debugger_url_matches_port(value: &str, port: u16) -> bool {
+    url::Url::parse(value).is_ok_and(|url| {
+        url.scheme() == "ws"
+            && url.host_str() == Some("127.0.0.1")
+            && url.port() == Some(port)
+            && url.path().starts_with("/devtools/browser/")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
 }
 
 fn serialize_youtube_cookies(cookies: &[BrowserCookie]) -> Result<String, String> {
     let filtered = cookies
         .iter()
         .filter(|cookie| is_youtube_domain(&cookie.domain))
-        .filter(|cookie| cookie_fields_are_safe(cookie))
+        .filter(|cookie| cookie_is_usable(cookie))
         .collect::<Vec<_>>();
-    let has_account_session = filtered.iter().any(|cookie| {
-        matches!(
-            cookie.name.as_str(),
-            "SAPISID" | "__Secure-1PAPISID" | "__Secure-3PAPISID" | "LOGIN_INFO"
-        ) && !cookie.value.is_empty()
-    });
-    if !has_account_session {
+    if !youtube_cookie_set_is_authenticated(cookies) {
         return Err(
             "Вход ещё не завершён. Завершите авторизацию в открывшемся браузере.".to_string(),
         );
@@ -849,14 +972,35 @@ fn serialize_youtube_cookies(cookies: &[BrowserCookie]) -> Result<String, String
 }
 
 fn youtube_cookie_set_is_authenticated(cookies: &[BrowserCookie]) -> bool {
-    cookies.iter().any(|cookie| {
-        is_youtube_domain(&cookie.domain)
-            && matches!(
-                cookie.name.as_str(),
-                "SAPISID" | "__Secure-1PAPISID" | "__Secure-3PAPISID" | "LOGIN_INFO"
-            )
+    // Match the downloader's authentication requirement, including logout/rotation detection.
+    let valid = |cookie: &&BrowserCookie| {
+        let domain = cookie.domain.trim_start_matches('.').to_ascii_lowercase();
+        (domain == "youtube.com" || domain == "www.youtube.com")
+            && (cookie.path.is_empty() || cookie.path == "/")
+            && cookie_is_usable(cookie)
             && !cookie.value.is_empty()
-    })
+    };
+    let mut account_cookies = cookies.iter().filter(valid);
+    let has_login = account_cookies
+        .clone()
+        .any(|cookie| cookie.name == "LOGIN_INFO");
+    let has_sid = account_cookies.any(|cookie| {
+        matches!(
+            cookie.name.as_str(),
+            "SAPISID" | "__Secure-1PAPISID" | "__Secure-3PAPISID"
+        )
+    });
+    has_login && has_sid
+}
+
+fn cookie_is_usable(cookie: &BrowserCookie) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    cookie_fields_are_safe(cookie)
+        && cookie.expires.is_finite()
+        && (cookie.expires <= 0.0 || cookie.expires > now)
 }
 
 fn save_youtube_session(
@@ -919,7 +1063,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn protect_session(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn protect_session(data: &[u8]) -> Result<Vec<u8>, String> {
     use windows::core::w;
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{
@@ -952,7 +1096,7 @@ fn protect_session(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn unprotect_session(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn unprotect_session(data: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{
         CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
@@ -991,58 +1135,6 @@ fn protect_session(_data: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(not(target_os = "windows"))]
 fn unprotect_session(_data: &[u8]) -> Result<Vec<u8>, String> {
     Err("Автоматический вход в YouTube пока поддерживается только в Windows.".to_string())
-}
-
-#[cfg(target_os = "windows")]
-fn profile_has_youtube_session(profile_dir: &Path) -> bool {
-    [
-        profile_dir.join("Default/Network/Cookies"),
-        profile_dir.join("Default/Cookies"),
-    ]
-    .into_iter()
-    .filter(|path| path.is_file())
-    .any(|path| match cookie_database_has_session(&path) {
-        Ok(result) => result,
-        Err(_) => copied_cookie_database_has_session(&path),
-    })
-}
-
-#[cfg(target_os = "windows")]
-fn cookie_database_has_session(path: &Path) -> rusqlite::Result<bool> {
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?
-    .query_row(
-        "SELECT EXISTS(SELECT 1 FROM cookies WHERE host_key LIKE '%youtube.com' AND name IN ('SAPISID', '__Secure-1PAPISID', '__Secure-3PAPISID', 'LOGIN_INFO'))",
-        [],
-        |row| row.get::<_, bool>(0),
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn copied_cookie_database_has_session(source: &Path) -> bool {
-    let temporary_dir = std::env::temp_dir().join(format!(
-        "ytloadster-auth-check-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    let destination = temporary_dir.join("Cookies");
-    let result = (|| {
-        fs::create_dir_all(&temporary_dir).ok()?;
-        fs::copy(source, &destination).ok()?;
-        let source_wal = PathBuf::from(format!("{}-wal", source.to_string_lossy()));
-        if source_wal.is_file() {
-            let _ = fs::copy(&source_wal, temporary_dir.join("Cookies-wal"));
-        }
-        cookie_database_has_session(&destination).ok()
-    })()
-    .unwrap_or(false);
-    let _ = fs::remove_dir_all(temporary_dir);
-    result
 }
 
 #[cfg(target_os = "windows")]
@@ -1161,11 +1253,6 @@ fn collect_process_tree(root_process_id: u32, entries: &[(u32, u32)]) -> HashSet
 }
 
 #[cfg(target_os = "windows")]
-fn terminate_browser_process_descendants(root_process_id: u32) {
-    terminate_browser_processes(root_process_id, false);
-}
-
-#[cfg(target_os = "windows")]
 fn terminate_browser_process_tree(root_process_id: u32) {
     terminate_browser_processes(root_process_id, true);
 }
@@ -1182,17 +1269,6 @@ fn terminate_browser_processes(root_process_id: u32, include_root: bool) {
                 let _ = CloseHandle(handle);
             }
         }
-    }
-}
-
-#[cfg(target_os = "windows")]
-async fn wait_for_browser_process_descendants(root_process_id: u32, timeout: Duration) {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        if browser_process_tree(root_process_id).len() <= 1 {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -1377,6 +1453,24 @@ fn installed_chromium_browsers() -> Vec<BrowserInstallation> {
 mod tests {
     use super::*;
 
+    fn cookie(name: &str, value: &str) -> BrowserCookie {
+        BrowserCookie {
+            name: name.into(),
+            value: value.into(),
+            domain: ".youtube.com".into(),
+            path: "/".into(),
+            expires: 1_900_000_000.0,
+            secure: true,
+        }
+    }
+
+    fn account_cookies(value: &str) -> Vec<BrowserCookie> {
+        vec![
+            cookie("SAPISID", value),
+            cookie("LOGIN_INFO", "account-login"),
+        ]
+    }
+
     #[test]
     fn login_continues_to_youtube_instead_of_a_technical_page() {
         assert!(YOUTUBE_LOGIN_URL.contains("www.youtube.com%2F"));
@@ -1411,38 +1505,6 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn detects_authenticated_youtube_profile() {
-        let profile_dir = std::env::temp_dir().join(format!(
-            "ytloadster-auth-test-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let database_path = profile_dir.join("Default/Network/Cookies");
-        fs::create_dir_all(database_path.parent().unwrap()).unwrap();
-        let connection = Connection::open(&database_path).unwrap();
-        connection
-            .execute(
-                "CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)",
-                [],
-            )
-            .unwrap();
-        assert!(!profile_has_youtube_session(&profile_dir));
-        connection
-            .execute(
-                "INSERT INTO cookies (host_key, name) VALUES ('.youtube.com', '__Secure-3PAPISID')",
-                [],
-            )
-            .unwrap();
-        assert!(profile_has_youtube_session(&profile_dir));
-        drop(connection);
-        fs::remove_dir_all(profile_dir).unwrap();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
     fn collects_the_complete_browser_process_tree() {
         let process_ids = collect_process_tree(
             100,
@@ -1464,6 +1526,8 @@ mod tests {
     #[test]
     fn exports_only_safe_youtube_cookies() {
         let cookies = vec![
+            cookie("LOGIN_INFO", "account-login"),
+            cookie("PREF", "bad\tvalue"),
             BrowserCookie {
                 name: "SAPISID".to_string(),
                 value: "secret".to_string(),
@@ -1487,6 +1551,7 @@ mod tests {
         assert!(text.contains(".youtube.com"));
         assert!(text.contains("SAPISID"));
         assert!(!text.contains("google-secret"));
+        assert!(!text.contains("bad\tvalue"));
     }
 
     #[test]
@@ -1504,8 +1569,77 @@ mod tests {
     }
 
     #[test]
+    fn preserves_session_only_cookies_for_the_downloader() {
+        let cookies = [
+            cookie("LOGIN_INFO", "account-login"),
+            BrowserCookie {
+                name: "SAPISID".into(),
+                value: "account".into(),
+                domain: ".youtube.com".into(),
+                path: "/".into(),
+                expires: 1_900_000_000.0,
+                secure: true,
+            },
+            BrowserCookie {
+                name: "SID".into(),
+                value: "session-only".into(),
+                domain: ".youtube.com".into(),
+                path: "/".into(),
+                expires: -1.0,
+                secure: true,
+            },
+        ];
+        let text = serialize_youtube_cookies(&cookies).unwrap();
+        assert!(text.contains(".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsession-only\r\n"));
+    }
+
+    #[test]
+    fn accepts_only_the_dedicated_loopback_debugger() {
+        assert!(live_debugger_url_matches_port(
+            "ws://127.0.0.1:9234/devtools/browser/id",
+            9234
+        ));
+        for url in [
+            "ws://127.0.0.1:9222/devtools/browser/id",
+            "ws://example.com:9234/devtools/browser/id",
+            "ws://127.0.0.1:9234/devtools/page/id",
+            "ws://user@127.0.0.1:9234/devtools/browser/id",
+        ] {
+            assert!(!live_debugger_url_matches_port(url, 9234));
+        }
+    }
+
+    #[tokio::test]
+    async fn discovers_the_live_browser_without_a_profile_restart() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let expected = format!("ws://127.0.0.1:{port}/devtools/browser/live-session");
+        let body = serde_json::json!({ "webSocketDebuggerUrl": expected }).to_string();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let count = socket.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /json/version "));
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        assert_eq!(wait_for_live_debugger_url(port).await.unwrap(), expected);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn webview_auth_requires_a_youtube_account_cookie() {
         let cookies = vec![
+            cookie("LOGIN_INFO", "account-login"),
             BrowserCookie {
                 name: "SID".to_string(),
                 value: "google-session".to_string(),
@@ -1526,5 +1660,328 @@ mod tests {
 
         assert!(youtube_cookie_set_is_authenticated(&cookies));
         assert!(!youtube_cookie_set_is_authenticated(&cookies[..1]));
+    }
+
+    #[test]
+    fn waits_for_complete_unexpired_youtube_authentication() {
+        assert!(!youtube_cookie_set_is_authenticated(&[cookie(
+            "SAPISID", "account"
+        )]));
+        assert!(!youtube_cookie_set_is_authenticated(&[cookie(
+            "LOGIN_INFO",
+            "account"
+        )]));
+        let mut cookies = account_cookies("account");
+        assert!(youtube_cookie_set_is_authenticated(&cookies));
+        cookies[1].expires = 1.0;
+        assert!(!youtube_cookie_set_is_authenticated(&cookies));
+        cookies[1].expires = -1.0;
+        assert!(youtube_cookie_set_is_authenticated(&cookies));
+        cookies[1].domain = ".google.com".into();
+        assert!(!youtube_cookie_set_is_authenticated(&cookies));
+        cookies[1].domain = "studio.youtube.com".into();
+        assert!(!youtube_cookie_set_is_authenticated(&cookies));
+        cookies[1] = cookie("LOGIN_INFO", "invalid\nvalue");
+        assert!(!youtube_cookie_set_is_authenticated(&cookies));
+    }
+
+    #[test]
+    fn saves_rotated_cookies_and_removes_the_session_after_browser_logout() {
+        use std::cell::{Cell, RefCell};
+        let saved = RefCell::new(None::<String>);
+        let writes = Cell::new(0);
+        let mut fingerprint = None;
+        let update = |fingerprint: &mut Option<[u8; 32]>, cookies: &[BrowserCookie]| {
+            update_live_youtube_session(
+                fingerprint,
+                cookies,
+                |cookies| {
+                    *saved.borrow_mut() = Some(serialize_youtube_cookies(cookies)?);
+                    writes.set(writes.get() + 1);
+                    Ok(())
+                },
+                || {
+                    *saved.borrow_mut() = None;
+                    Ok(())
+                },
+            )
+        };
+        assert!(!update(&mut fingerprint, &[cookie("PREF", "ru")]).unwrap());
+        assert!(saved.borrow().is_none());
+        assert!(update(&mut fingerprint, &account_cookies("first-session")).unwrap());
+        assert!(saved.borrow().as_ref().unwrap().contains("first-session"));
+        assert!(update(&mut fingerprint, &account_cookies("first-session")).unwrap());
+        assert_eq!(writes.get(), 1);
+        assert!(update(&mut fingerprint, &account_cookies("rotated-session")).unwrap());
+        assert!(saved.borrow().as_ref().unwrap().contains("rotated-session"));
+        assert!(!saved.borrow().as_ref().unwrap().contains("first-session"));
+        assert!(!update(&mut fingerprint, &[cookie("SAPISID", "left-after-logout")]).unwrap());
+        assert!(saved.borrow().is_none());
+        assert!(update(&mut fingerprint, &account_cookies("signed-in-again")).unwrap());
+        assert!(saved.borrow().as_ref().unwrap().contains("signed-in-again"));
+    }
+
+    #[test]
+    fn does_not_report_saved_authentication_when_protection_fails() {
+        let mut fingerprint = None;
+        assert!(update_live_youtube_session(
+            &mut fingerprint,
+            &account_cookies("account"),
+            |_| Err("storage unavailable".into()),
+            || Ok(())
+        )
+        .is_err());
+        assert!(fingerprint.is_none());
+    }
+
+    #[tokio::test]
+    async fn reads_live_cookie_rotation_and_closed_windows_from_the_same_browser() {
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/browser/test",
+            listener.local_addr().unwrap().port()
+        );
+        let server = tokio::spawn(async move {
+            for (value, open) in [("first", true), ("rotated", true), ("rotated", false)] {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                let mut cookies = account_cookies(value);
+                let mut other_cookie = cookie("SID", "google-secret");
+                other_cookie.domain = ".google.com".into();
+                cookies.push(other_cookie);
+                cookies.push(BrowserCookie {
+                    expires: -1.0,
+                    ..cookie("SID", "session-only")
+                });
+                for (id, method) in [(1, "Storage.getCookies"), (2, "Target.getTargets")] {
+                    let request = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                    assert_eq!(request["method"], method);
+                    assert_eq!(request["id"], id);
+                    let result = if id == 1 {
+                        serde_json::json!({"cookies": cookies})
+                    } else {
+                        serde_json::json!({"targetInfos": [{"type": if open {"page"} else {"service_worker"}}]})
+                    };
+                    // Ignore unsolicited CDP events rather than mistaking them for a response.
+                    socket
+                        .send(Message::Text(
+                            serde_json::json!({"method":"Target.targetCreated"})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                    socket
+                        .send(Message::Text(
+                            serde_json::json!({"id":id,"result":result})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let first = read_live_browser_snapshot(&url).await.unwrap();
+        assert!(first.open);
+        assert!(youtube_cookie_set_is_authenticated(&first.cookies));
+        assert!(serialize_youtube_cookies(&first.cookies)
+            .unwrap()
+            .contains("first"));
+        assert!(!serialize_youtube_cookies(&first.cookies)
+            .unwrap()
+            .contains("google-secret"));
+        let rotated = read_live_browser_snapshot(&url).await.unwrap();
+        assert!(rotated.open);
+        let text = serialize_youtube_cookies(&rotated.cookies).unwrap();
+        assert!(text.contains("rotated"));
+        assert!(text.contains("\t0\tSID\tsession-only\r\n"));
+        assert!(!read_live_browser_snapshot(&url).await.unwrap().open);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_a_closed_cdp_connection_without_exposing_cookies() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/browser/test",
+            listener.local_addr().unwrap().port()
+        );
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let _ = socket.next().await;
+            socket.close(None).await.unwrap();
+        });
+        assert_eq!(
+            read_live_browser_snapshot(&url).await.err().unwrap(),
+            "youtube-auth-refresh-failed"
+        );
+        server.await.unwrap();
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[tokio::test]
+    #[ignore = "requires an installed Chromium browser; uses an isolated headless test profile"]
+    async fn captures_and_refreshes_cookies_from_an_open_installed_browser() {
+        use std::cell::RefCell;
+        use tokio_tungstenite::tungstenite::Message;
+        struct Attempt(Option<ActiveAuth>);
+        impl Drop for Attempt {
+            fn drop(&mut self) {
+                if let Some(active) = self.0.take() {
+                    stop_and_remove_auth_attempt(active);
+                }
+            }
+        }
+        let browser = choose_browser(None).expect("A Chromium browser is required for this test");
+        let profile = unique_auth_profile_dir(
+            &std::env::temp_dir().join("ytloadster-cdp-test"),
+            browser.id,
+        );
+        fs::create_dir_all(&profile).unwrap();
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let child = auth_browser_command(&browser.executable, &profile, port)
+            .arg("--headless=new")
+            .arg("about:blank")
+            .spawn()
+            .unwrap();
+        let mut attempt = Attempt(Some(ActiveAuth {
+            browser_name: browser.name.into(),
+            websocket_url: String::new(),
+            cookie_fingerprint: None,
+            profile_dir: profile,
+            child,
+            window_seen: false,
+        }));
+        let url = wait_for_live_debugger_url(port).await.unwrap();
+        attempt.0.as_mut().unwrap().websocket_url = url.clone();
+        let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let saved = RefCell::new(Vec::<u8>::new());
+        let mut fingerprint = None;
+        let update = |fingerprint: &mut Option<[u8; 32]>, cookies: &[BrowserCookie]| {
+            update_live_youtube_session(
+                fingerprint,
+                cookies,
+                |cookies| {
+                    let text = serialize_youtube_cookies(cookies)?;
+                    #[cfg(target_os = "windows")]
+                    {
+                        *saved.borrow_mut() = protect_session(text.as_bytes())?;
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        *saved.borrow_mut() = text.into_bytes();
+                    }
+                    Ok(())
+                },
+                || {
+                    saved.borrow_mut().clear();
+                    Ok(())
+                },
+            )
+        };
+        for (id, value) in [
+            (1, "first"),
+            (2, "rotated"),
+            (3, "logout"),
+            (4, "signed-in-again"),
+        ] {
+            let mut cookies = if value == "logout" {
+                vec![BrowserCookie {
+                    expires: 1.0,
+                    ..cookie("LOGIN_INFO", "expired")
+                }]
+            } else {
+                account_cookies(value)
+            };
+            let mut google_cookie = cookie("SID", "not-exported");
+            google_cookie.domain = ".google.com".into();
+            cookies.push(google_cookie);
+            socket.send(Message::Text(serde_json::json!({"id":id,"method":"Storage.setCookies","params":{"cookies":cookies}}).to_string().into())).await.unwrap();
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                if let Message::Text(text) = message {
+                    let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if response["id"] == id {
+                        assert!(response.get("error").is_none());
+                        break;
+                    }
+                }
+            }
+            let snapshot = read_live_browser_snapshot(&url).await.unwrap();
+            assert!(snapshot.open, "Saving cookies must leave the browser open");
+            assert_eq!(
+                update(&mut fingerprint, &snapshot.cookies).unwrap(),
+                value != "logout"
+            );
+            if value == "logout" {
+                assert!(saved.borrow().is_empty());
+            } else {
+                #[cfg(target_os = "windows")]
+                let plaintext = unprotect_session(&saved.borrow()).unwrap();
+                #[cfg(target_os = "macos")]
+                let plaintext = saved.borrow().clone();
+                let text = String::from_utf8(plaintext).unwrap();
+                assert!(text.contains(value));
+                assert!(!text.contains("not-exported"));
+                #[cfg(target_os = "windows")]
+                assert!(!String::from_utf8_lossy(&saved.borrow()).contains(value));
+            }
+        }
+        let last_saved = saved.borrow().clone();
+        socket
+            .send(Message::Text(
+                serde_json::json!({"id":5,"method":"Browser.close"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!read_live_browser_snapshot(&url)
+            .await
+            .is_ok_and(|snapshot| snapshot.open));
+        assert_eq!(*saved.borrow(), last_saved);
+        drop(attempt);
+
+        // Exiting the app must also clean a browser whose CDP connection is still starting.
+        let pending_profile = unique_auth_profile_dir(
+            &std::env::temp_dir().join("ytloadster-cdp-test"),
+            browser.id,
+        );
+        fs::create_dir_all(&pending_profile).unwrap();
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let child = auth_browser_command(&browser.executable, &pending_profile, port)
+            .arg("--headless=new")
+            .arg("about:blank")
+            .spawn()
+            .unwrap();
+        let manager = YoutubeAuthManager::default();
+        *manager.active.lock().unwrap() = Some(ActiveAuth {
+            browser_name: browser.name.into(),
+            websocket_url: String::new(),
+            cookie_fingerprint: None,
+            profile_dir: pending_profile.clone(),
+            child,
+            window_seen: false,
+        });
+        manager.shutdown();
+        assert!(manager.active.lock().unwrap().is_none());
+        assert!(!pending_profile.exists());
     }
 }

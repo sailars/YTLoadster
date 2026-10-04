@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../lib/i18n";
 import type { Job, MediaInfo, PlaylistInfo, PlaylistItemAnalysis } from "../lib/types";
 import { api } from "../lib/api";
@@ -13,6 +13,8 @@ vi.mock("../lib/api", () => ({
     getAvailableDiskSpace: vi.fn().mockResolvedValue({ available: 100 * 1024 ** 3, total: 250 * 1024 ** 3 }),
     selectDownloadDir: vi.fn().mockResolvedValue("D:/Video"),
     probePlaylist: vi.fn(),
+    beginPlaylistAnalysis: vi.fn().mockResolvedValue(undefined),
+    cancelPlaylistAnalysis: vi.fn().mockResolvedValue(undefined),
     probePlaylistItem: vi.fn(),
     checkHistoryDuplicates: vi.fn().mockResolvedValue([]),
     enqueueDownloadBatch: vi.fn().mockResolvedValue({ queued: [], rejected: [] }),
@@ -117,12 +119,33 @@ function playlistElement(options: {
 }
 
 describe("Playlist", () => {
+  afterEach(() => vi.useRealTimers());
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getDefaultDownloadDir).mockResolvedValue("C:/Downloads");
     vi.mocked(api.getAvailableDiskSpace).mockResolvedValue({ available: 100 * 1024 ** 3, total: 250 * 1024 ** 3 });
     vi.mocked(api.checkHistoryDuplicates).mockResolvedValue([]);
     vi.mocked(api.enqueueDownloadBatch).mockResolvedValue({ queued: [], rejected: [] });
+  });
+
+  it.each([
+    ["youtube-auth-refresh-failed", /не удалось обновить сессию YouTube/i],
+    ["youtube-auth-session-unavailable", /сессия YouTube не активна/i],
+  ])("explains live YouTube session errors during playlist discovery: %s", async (error, text) => {
+    vi.mocked(api.probePlaylist).mockRejectedValueOnce(error);
+    renderPlaylist();
+    expect(await screen.findByText(text)).toBeInTheDocument();
+    expect(screen.queryByText(String(error))).not.toBeInTheDocument();
+  });
+
+  it("explains a live YouTube session failure for an individual playlist item", async () => {
+    vi.mocked(api.probePlaylist).mockResolvedValueOnce(playlistInfo(1));
+    vi.mocked(api.probePlaylistItem).mockResolvedValueOnce({
+      entryId: "item-1", state: "requiresAuth", media: null,
+      issue: { code: "authenticationRequired", message: "youtube-auth-session-unavailable", retryable: false, requiresAuth: true },
+    });
+    renderPlaylist();
+    expect(await screen.findByText(/сессия YouTube не активна/i)).toBeInTheDocument();
   });
 
   it("analyzes progressively with no more than two parallel item probes", async () => {
@@ -145,27 +168,46 @@ describe("Playlist", () => {
     expect(maximumActive).toBe(2);
   });
 
-  it("stops and resumes without discarding analyzed rows", async () => {
+  it("shows the sixty-second network error when playlist discovery times out", async () => {
+    vi.mocked(api.probePlaylist).mockRejectedValue("analysis-error:timeout");
+
+    renderPlaylist();
+
+    expect(await screen.findByText(/не удалось проанализировать ссылку\. проверьте подключение/i)).toBeInTheDocument();
+    expect(api.probePlaylistItem).not.toHaveBeenCalled();
+  });
+
+  it("cancels in-flight probes and resumes them in a new analysis session", async () => {
     vi.mocked(api.probePlaylist).mockResolvedValue(playlistInfo(3));
-    const resolvers = new Map<string, (result: PlaylistItemAnalysis) => void>();
+    const resolvers = new Map<string, Array<(result: PlaylistItemAnalysis) => void>>();
     vi.mocked(api.probePlaylistItem).mockImplementation((entryId) => new Promise((resolve) => {
-      resolvers.set(entryId, resolve);
+      resolvers.set(entryId, [...(resolvers.get(entryId) ?? []), resolve]);
     }));
 
     renderPlaylist();
     await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledTimes(2), { timeout: 2_000 });
+    const firstSessionId = vi.mocked(api.beginPlaylistAnalysis).mock.calls[0][0];
     await userEvent.click(screen.getByRole("button", { name: "Остановить" }));
+    expect(api.cancelPlaylistAnalysis).toHaveBeenCalledWith(firstSessionId);
     await act(async () => {
-      resolvers.get("item-1")?.(ready("item-1"));
-      resolvers.get("item-2")?.(ready("item-2"));
+      resolvers.get("item-1")?.[0]?.(ready("item-1"));
+      resolvers.get("item-2")?.[0]?.(ready("item-2"));
     });
 
-    expect(await screen.findAllByText("Доступно")).toHaveLength(2);
+    expect(screen.queryByText("Доступно")).not.toBeInTheDocument();
     expect(api.probePlaylistItem).toHaveBeenCalledTimes(2);
     await userEvent.click(screen.getByRole("button", { name: "Продолжить анализ" }));
-    await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledTimes(4));
+    const beginCalls = vi.mocked(api.beginPlaylistAnalysis).mock.calls;
+    const secondSessionId = beginCalls[beginCalls.length - 1]?.[0];
+    expect(secondSessionId).not.toBe(firstSessionId);
     await act(async () => {
-      resolvers.get("item-3")?.(ready("item-3"));
+      resolvers.get("item-1")?.[1]?.(ready("item-1"));
+      resolvers.get("item-2")?.[1]?.(ready("item-2"));
+    });
+    await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledTimes(5));
+    await act(async () => {
+      resolvers.get("item-3")?.[0]?.(ready("item-3"));
     });
     expect(await screen.findAllByText("Доступно")).toHaveLength(3);
   });
@@ -205,6 +247,26 @@ describe("Playlist", () => {
     await userEvent.click(screen.getByRole("button", { name: "Продолжить" }));
     await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledTimes(4));
     await waitFor(() => expect(screen.getAllByText("Доступно")).toHaveLength(3));
+  });
+
+  it("does not start a second sixty-second attempt after an item timeout", async () => {
+    vi.mocked(api.probePlaylist).mockResolvedValue(playlistInfo(1));
+    vi.mocked(api.probePlaylistItem).mockResolvedValue({
+      entryId: "item-1",
+      state: "temporaryError",
+      issue: {
+        code: "network",
+        message: "analysis-error:timeout",
+        retryable: true,
+        requiresAuth: false,
+      },
+    });
+
+    renderPlaylist();
+
+    expect(await screen.findByText("Временная ошибка", {}, { timeout: 2_000 })).toBeInTheDocument();
+    expect(screen.getByText(/не удалось проанализировать ссылку\. проверьте подключение/i)).toBeInTheDocument();
+    expect(api.probePlaylistItem).toHaveBeenCalledTimes(1);
   });
 
   it("retries only authentication-related rows after a successful sign-in", async () => {
@@ -666,6 +728,35 @@ describe("Playlist", () => {
     expect(document.querySelectorAll(".playlist-audio-settings .playlist-toggle-list .switch-row")).toHaveLength(2);
   });
 
+  it("hides playlist enqueue feedback ten seconds after the latest successful batch", async () => {
+    vi.mocked(api.probePlaylist).mockResolvedValue(playlistInfo(1));
+    vi.mocked(api.probePlaylistItem).mockImplementation(async (entryId) => ready(entryId));
+    vi.mocked(api.enqueueDownloadBatch).mockImplementation(async (items) => ({
+      queued: items.map((item, index) => ({
+        clientId: item.clientId,
+        job: { id: index + 1, state: "Pending", request: item.request },
+      })),
+      rejected: [],
+    }));
+    renderPlaylist();
+    const button = await screen.findByRole("button", { name: "Скачать выбранные (1)" }, { timeout: 2_000 });
+    await waitFor(() => expect(button).toBeEnabled());
+    vi.useFakeTimers();
+    await act(async () => { fireEvent.click(button); });
+    expect(screen.getByText("Добавлено: 1. Пропущено: 0.")).toBeInTheDocument();
+    const countdown = document.querySelector(".playlist-batch-feedback svg");
+    expect(countdown).toHaveAttribute("aria-hidden", "true");
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    await act(async () => { fireEvent.click(button); });
+    expect(api.enqueueDownloadBatch).toHaveBeenCalledTimes(2);
+    expect(document.querySelector(".playlist-batch-feedback svg")).not.toBe(countdown);
+    await act(async () => vi.advanceTimersByTimeAsync(9_999));
+    expect(screen.getByText("Добавлено: 1. Пропущено: 0.")).toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(screen.queryByText("Добавлено: 1. Пропущено: 0.")).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox")).toBeInTheDocument();
+  });
+
   it("shows an alert beside the action when an active queue duplicate is skipped", async () => {
     vi.mocked(api.probePlaylist).mockResolvedValue(playlistInfo(1));
     vi.mocked(api.probePlaylistItem).mockImplementation(async (entryId) => ready(entryId));
@@ -680,8 +771,14 @@ describe("Playlist", () => {
     await userEvent.click(button);
 
     const feedback = await screen.findByRole("alert");
+    expect(feedback.querySelector(".notice-countdown")).toBeNull();
     expect(feedback).toHaveTextContent("Не все объекты добавлены");
     expect(feedback).toHaveTextContent("Добавлено: 0. Пропущено: 1.");
     expect(screen.getByText("Видео с этими параметрами уже находится в Очереди загрузок")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Закрыть уведомление о добавлении в очередь" }));
+    expect(feedback).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox")).toBeInTheDocument();
+    await userEvent.click(button);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Добавлено: 0. Пропущено: 1.");
   });
 });
