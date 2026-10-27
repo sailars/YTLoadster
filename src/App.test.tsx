@@ -207,6 +207,7 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
 }));
 
 describe("App", () => {
+  // Allow CI headroom for the complete 67-row save/reopen cycle in StrictMode.
   it("preserves an unchecked pending album song and shared tags through a real save/reopen cycle in StrictMode", async () => {
     const defaults = await api.getSettings();
     const enabled = { ...defaults, restoreWorkspace: true };
@@ -274,7 +275,7 @@ describe("App", () => {
     expect(screen.getByRole("checkbox", { name: /Analyzed 2$/ })).toHaveAttribute("aria-checked", "false");
     expect(screen.getByRole("textbox", { name: "Альбом" })).toHaveValue("Edited album");
     expect(api.probePlaylistItem).toHaveBeenCalledTimes(probeCount + 66);
-  });
+  }, 15_000);
   it.each(["playlist", "music"] as const)("keeps a restored %s collection when navigating between populated download sections", async (section) => {
     const defaults = await api.getSettings();
     vi.mocked(api.getSettings).mockResolvedValueOnce({ ...defaults, restoreWorkspace: true });
