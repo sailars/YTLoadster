@@ -5,6 +5,12 @@
 которые сохраняют собственные лицензии. MIT License проекта на них не
 распространяется.
 
+В release-пакетах основная лицензия программы `LICENSE.txt` и этот документ
+находятся в корне. Дополнительные лицензии, реестры зависимостей и
+`COMPONENTS.txt` собраны в папке `LICENSE/`. На macOS эта структура находится
+внутри `YTLoadster.app/Contents/Resources/`. Пути к файлам ниже указаны
+относительно папки `LICENSE/`.
+
 ## yt-dlp
 
 - Проект: https://github.com/yt-dlp/yt-dlp
@@ -27,9 +33,10 @@
 
 Текст LGPL v3 находится в файле `FFMPEG_LGPL-3.0.txt`. Версии, исходный код и сведения о сборке указаны в `COMPONENTS.txt`.
 
-## macOS: FFmpeg, FFprobe и LAME
+## macOS: FFmpeg, FFprobe, LAME и Opus
 
-- macOS-сборка включает FFmpeg, FFprobe и LAME.
+- macOS-сборка включает FFmpeg, FFprobe, LAME и статически связанную libopus.
+- libopus 1.6.1 распространяется по BSD-3-Clause; исходный код: https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz. Текст лицензии входит в пакет как `OPUS_BSD.txt`.
 - FFmpeg и FFprobe распространяются по LGPL-2.1-or-later.
 - LAME распространяется по LGPL-2.0.
 - Полные тексты лицензий входят в приложение.

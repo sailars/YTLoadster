@@ -1,65 +1,43 @@
 import type { MediaInfo } from "../../lib/types";
 import { useI18n, type Translate } from "../../lib/i18n";
 import { MediaThumbnail } from "../MediaThumbnail";
-import { UrlInput } from "./UrlInput";
+import { musicMetadata } from "../../lib/musicModel";
+import { YouTubeMusicIcon } from "../YouTubeMusicIcon";
 
 type Props = {
+  music?: boolean;
   url: string;
   media: MediaInfo | null;
-  error: string | null;
-  isAnalyzing: boolean;
-  onUrlChange: (value: string) => void;
-  onPaste: () => void;
-  onClear: () => void;
   onOpen: () => void;
   onCopy: () => void;
 };
 
 export function MediaPreview({
+  music = false,
   url,
   media,
-  error,
-  isAnalyzing,
-  onUrlChange,
-  onPaste,
-  onClear,
   onOpen,
   onCopy,
 }: Props) {
   const { locale, t } = useI18n();
   return (
     <div className="media-column">
-      <UrlInput
-        id="video-url"
-        label={t("media.url")}
-        value={url}
-        placeholder={t("media.placeholder")}
-        pasteLabel={t("media.paste")}
-        pasteTooltip={t("media.pasteTooltip")}
-        clearLabel={t("media.clear")}
-        onChange={onUrlChange}
-        onPaste={onPaste}
-        onClear={onClear}
-      />
-
-      {error ? <p className="error">{error}</p> : null}
-      {isAnalyzing ? <p className="analysis-status">{t("media.analyzing")}</p> : null}
-
       {media ? (
         <div className="media-card">
           <MediaThumbnail
+            zoomable={music}
             src={media.thumbnail}
             mediaUrl={media.webpageUrl || url}
-            alt={t("media.preview")}
+            alt={music ? musicMetadata(media).title : t("media.preview")}
             className="media-thumbnail"
             placeholderClassName="media-thumbnail placeholder"
           />
           <div className="media-copy">
-            <h2>{media.title}</h2>
-            <p className="media-meta">{mediaMeta(media, locale, t)}</p>
-            {media.description ? <p className="media-description">{trimDescription(media.description)}</p> : null}
+            <h2>{music ? musicMetadata(media).title : media.title}</h2>
+            <p className="media-meta">{music ? musicMetadata(media).artist : mediaMeta(media, locale, t)}</p>
+            {music ? <p className="media-meta">{[musicMetadata(media).album, musicMetadata(media).year, media.duration != null ? `${Math.floor(media.duration / 60)}:${String(media.duration % 60).padStart(2, "0")}` : null].filter(Boolean).join(" · ")}</p> : media.description ? <p className="media-description">{trimDescription(media.description)}</p> : null}
           </div>
-          <div className="media-actions" aria-label={t("media.actions")}>
+          <div className="media-actions" hidden={music} aria-label={t("media.actions")}>
             <button type="button" className="icon-text-button secondary" onClick={onOpen}>
               <ExternalLinkIcon />
               <span>{t("media.open")}</span>
@@ -71,10 +49,10 @@ export function MediaPreview({
           </div>
         </div>
       ) : (
-        <div className="media-empty" aria-live="polite">
-          <div className="media-empty-icon" aria-hidden="true"><VideoIcon /></div>
-          <strong>{t("media.emptyTitle")}</strong>
-          <span>{t("media.emptyText")}</span>
+        <div className="section-empty playlist-empty source-empty" aria-live="polite">
+          {music ? <YouTubeMusicIcon /> : <VideoIcon />}
+          <strong>{t(music ? "nav.music" : "media.emptyPreviewTitle")}</strong>
+          <span>{t(music ? "music.empty" : "media.emptyText")}</span>
         </div>
       )}
     </div>

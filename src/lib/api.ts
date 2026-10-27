@@ -29,6 +29,12 @@ import type {
 } from "./types";
 
 export const api = {
+  previewAlbumDestination(baseDir: string, albumArtist: string, album: string, createAlbumFolder: boolean) {
+    return invoke<string>("preview_album_destination", { baseDir, albumArtist, album, createAlbumFolder });
+  },
+  getAudioEncoders() {
+    return invoke<string[]>("get_audio_encoders");
+  },
   getAppStatus() {
     return invoke<AppStatus>("get_app_status");
   },
@@ -55,6 +61,9 @@ export const api = {
   },
   updateSettings(patch: SettingsPatch) {
     return invoke<AppSettings>("update_settings", { patch });
+  },
+  resetSettings() {
+    return invoke<{ settings: AppSettings; defaultDestinationDir: string }>("reset_settings");
   },
   setTrayLocale(locale: "ru" | "en") {
     return invoke<void>("set_tray_locale", { locale });

@@ -1,20 +1,29 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import App from "./App";
+import packageMetadata from "../package.json";
 import { sidebarPinnedStorageKey } from "./components/Sidebar";
 import { api } from "./lib/api";
 import { themeStorageKey } from "./lib/theme";
 import { localeStorageKey } from "./lib/i18n";
 import { notificationsStorageKey } from "./lib/notifications";
 import { automaticUpdateChecksStorageKey } from "./lib/updates";
+import { browserAuthStorageKey } from "./lib/browserAuth";
+import { videoProfileStorageKey } from "./components/downloader/videoProfiles";
+import { emptyWorkspace, loadWorkspace, saveWorkspace, workspaceStorageKey, type CollectionWorkspace } from "./lib/workspace";
+import { defaultPlaylistParameters } from "./lib/playlistModel";
 import type { Job } from "./lib/types";
 import "./styles.css";
 
 vi.mock("./lib/api", () => ({
   api: {
+    previewAlbumDestination: vi.fn().mockImplementation(async (base, artist, album, enabled) => enabled ? `${base}/${artist} - ${album}` : base),
+    resetSettings: vi.fn(),
+    getAudioEncoders: vi.fn().mockResolvedValue(["aac", "libmp3lame", "libopus", "flac"]),
     getAppStatus: vi.fn().mockResolvedValue({ name: "YTLoadster", ready: true, platform: "windows" }),
     getDefaultDownloadDir: vi.fn().mockResolvedValue("C:/Users/TestUser/Downloads"),
     getAvailableDiskSpace: vi.fn().mockResolvedValue({ available: 100 * 1024 ** 3, total: 250 * 1024 ** 3 }),
@@ -198,6 +207,214 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
 }));
 
 describe("App", () => {
+  it("preserves an unchecked pending album song and shared tags through a real save/reopen cycle in StrictMode", async () => {
+    const defaults = await api.getSettings();
+    const enabled = { ...defaults, restoreWorkspace: true };
+    vi.mocked(api.getSettings)
+      .mockResolvedValueOnce({ ...defaults, restoreWorkspace: false })
+      .mockResolvedValueOnce({ ...defaults, restoreWorkspace: false })
+      .mockResolvedValueOnce(enabled).mockResolvedValueOnce(enabled);
+    vi.mocked(api.updateSettings).mockResolvedValueOnce(enabled);
+    vi.mocked(api.probePlaylist).mockResolvedValueOnce({
+      id: "OLAK5uy_test", title: "Original album", musicKind: "album",
+      entries: Array.from({ length: 67 }, (_, index) => ({ id: `song-${index + 1}`, index: index + 1,
+        title: `Pending ${index + 1}`, url: `https://youtube.com/watch?v=song-${index + 1}` })),
+    });
+    vi.mocked(api.probePlaylistItem).mockImplementation((id) => id === "0:song-1" ? Promise.resolve({ entryId: id, state: "ready", media: {
+      title: "Ready song", videoFormats: [{ kind: "video", formatId: "137", qualityLabel: "1080p", height: 1080, fps: 30, ext: "mp4", codec: "avc1" }],
+      audioFormats: [{ kind: "audio", formatId: "140", qualityLabel: "AAC", ext: "m4a", codec: "mp4a" }],
+      music: { title: "Ready song", artist: "Original artist", album: "Original album", albumArtist: "Original artist", year: "2025", trackNumber: 1 },
+    } }) : new Promise(() => {}));
+    const view = render(<StrictMode><App /></StrictMode>);
+    await userEvent.click(screen.getByRole("button", { name: "YouTube Music" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Ссылка YouTube Music" }), { target: { value: "https://music.youtube.com/playlist?list=OLAK5uy_test" } });
+    await userEvent.click(await screen.findByRole("button", { name: "Начать анализ" }, { timeout: 3_000 }));
+    await screen.findByText("Анализ: 1 из 67");
+    await userEvent.click(screen.getByRole("button", { name: "Остановить" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /Pending 2$/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Исполнитель альбома" }), { target: { value: "Edited artist" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Альбом" }), { target: { value: "Edited album" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Год" }), { target: { value: "2026" } });
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Восстанавливать открытые разделы" }));
+    await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ restoreWorkspace: true }));
+    await userEvent.click(screen.getByRole("button", { name: "YouTube Music" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Клип" }));
+    await userEvent.click(screen.getByRole("button", { name: "Дополнительно" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Разрешение" }));
+    await userEvent.click(screen.getByRole("option", { name: /1080p/ }));
+    view.unmount();
+    const saved = loadWorkspace()?.views.musicCollection;
+    expect(saved).toMatchObject({ kind: "collection", albumEdits: { albumArtist: "Edited artist", album: "Edited album", year: "2026" }, params: { mode: "video", resolution: 1080, videoProfile: "custom" } });
+    if (saved?.kind !== "collection") throw new Error("Missing saved collection");
+    expect(saved.rows[1]).toMatchObject({ selected: false, analysisState: "pending" });
+    const probeCount = vi.mocked(api.probePlaylistItem).mock.calls.length;
+    render(<StrictMode><App /></StrictMode>);
+    await screen.findByText("Анализ: 1 из 67");
+    expect(screen.getByRole("checkbox", { name: /Pending 2$/ })).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByRole("tab", { name: "Клип" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("combobox", { name: "Профиль скачивания" })).toHaveTextContent("Пользовательский");
+    await userEvent.click(screen.getByRole("tab", { name: "Трек" }));
+    expect(screen.getByRole("textbox", { name: "Исполнитель альбома" })).toHaveValue("Edited artist");
+    expect(screen.getByRole("textbox", { name: "Альбом" })).toHaveValue("Edited album");
+    expect(screen.getByRole("textbox", { name: "Год" })).toHaveValue("2026");
+    await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
+    await userEvent.click(screen.getByRole("button", { name: "YouTube Music" }));
+    expect(screen.getByRole("checkbox", { name: /Pending 2$/ })).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByRole("textbox", { name: "Альбом" })).toHaveValue("Edited album");
+    expect(api.probePlaylist).toHaveBeenCalledTimes(1);
+    expect(api.probePlaylistItem).toHaveBeenCalledTimes(probeCount);
+    expect(api.enqueueDownloadBatch).not.toHaveBeenCalled();
+    vi.mocked(api.probePlaylistItem).mockImplementation(async (id) => ({ entryId: id, state: "ready", media: {
+      title: `Analyzed ${Number(id.match(/song-(\d+)$/)?.[1])}`, videoFormats: [],
+      audioFormats: [{ kind: "audio", formatId: "140", qualityLabel: "AAC", ext: "m4a", codec: "mp4a" }],
+    } }));
+    await userEvent.click(screen.getByRole("button", { name: "Продолжить анализ" }));
+    await screen.findByText("Анализ: 67 из 67", {}, { timeout: 5_000 });
+    expect(screen.getByRole("checkbox", { name: /Analyzed 2$/ })).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByRole("textbox", { name: "Альбом" })).toHaveValue("Edited album");
+    expect(api.probePlaylistItem).toHaveBeenCalledTimes(probeCount + 66);
+  });
+  it.each(["playlist", "music"] as const)("keeps a restored %s collection when navigating between populated download sections", async (section) => {
+    const defaults = await api.getSettings();
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...defaults, restoreWorkspace: true });
+    const saved = emptyWorkspace();
+    saved.activeSection = section;
+    saved.urls = { new: "https://youtube.com/watch?v=cached-video", playlist: "https://youtube.com/playlist?list=PL-cached", music: "https://music.youtube.com/playlist?list=OLAK5uy_cached" };
+    const cachedMedia = { title: "Cached track", uploader: "Cached artist", videoFormats: [], audioFormats: [{ kind: "audio" as const, formatId: "140", qualityLabel: "AAC" }] };
+    saved.views.new = { kind: "single", url: saved.urls.new, media: cachedMedia, mode: "audio", preset: "audioMp3", destinationDir: "saved-target", videoProfile: "best", selectedVideoFormatId: null, selectedAudioFormatId: "140", selectedSubtitleKey: null, selectedSubtitleFormat: null, audioBitrate: "192K", audioChannels: "stereo", embedMetadata: true, embedThumbnail: false, musicQuality: "best", musicEdits: {} };
+    const collection = (music: boolean): CollectionWorkspace => {
+      const entry = { id: "cached-track", index: 1, title: "Cached track", url: "https://youtube.com/watch?v=cached-track" };
+      const rowId = music ? "0:cached-track" : entry.id;
+      return { kind: "collection", url: music ? saved.urls.music : saved.urls.playlist,
+        playlist: { id: music ? "OLAK5uy_cached" : "PL-cached", title: "Cached collection", entries: [entry], ...(music ? { musicKind: "album" } : {}) },
+        rows: [{ entry: { ...entry, id: rowId }, selected: false, analysisState: "ready", media: cachedMedia }],
+        params: { ...defaultPlaylistParameters, mode: "audio", audioPreset: "audioSource", destinationDir: "saved-target" },
+        musicEdits: music ? { [rowId]: { title: "Edited track", artist: "Edited artist" } } : {},
+        albumEdits: music ? { album: "Edited album" } : {}, createAlbumFolder: false, layout: "wide" };
+    };
+    saved.views.playlist = collection(false);
+    saved.views.musicCollection = collection(true);
+    saveWorkspace(saved);
+    render(<App />);
+    const name = section === "music" ? "YouTube Music" : "Плейлист";
+    const title = section === "music" ? /Edited track/ : /Cached track/;
+    const collectionRegion = () => screen.getAllByRole("region", { name }).find((node) => node.classList.contains("playlist-view"));
+    await waitFor(() => expect(collectionRegion()).toBeDefined());
+    const region = collectionRegion()!;
+    await within(region).findByText("Анализ: 1 из 1");
+    await userEvent.click(within(region).getByRole("checkbox", { name: title }));
+    for (const target of ["Новая загрузка", "История", "Настройки"]) {
+      await userEvent.click(screen.getByRole("button", { name: target }));
+      await userEvent.click(screen.getByRole("button", { name }));
+      expect(within(collectionRegion()!).getByText("Анализ: 1 из 1")).toBeInTheDocument();
+      expect(within(collectionRegion()!).getByRole("checkbox", { name: title })).toHaveAttribute("aria-checked", "true");
+    }
+    expect(api.probePlaylist).not.toHaveBeenCalled();
+    expect(api.probePlaylistItem).not.toHaveBeenCalled();
+    expect(api.probeUrl).not.toHaveBeenCalled();
+    if (section === "music") expect(within(region).getByRole("textbox", { name: "Альбом" })).toHaveValue("Edited album");
+  });
+  it.each([false, true])("restores a download view only when the saved preference is enabled: %s", async (enabled) => {
+    const defaults = await api.getSettings();
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...defaults, restoreWorkspace: enabled });
+    const saved = emptyWorkspace();
+    saved.urls.new = "https://youtube.com/watch?v=cached";
+    saved.views.new = {
+      kind: "single", url: saved.urls.new, media: { title: "Cached video", videoFormats: [], audioFormats: [{ kind: "audio", formatId: "140", qualityLabel: "AAC" }] },
+      mode: "audio", preset: "audioMp3", destinationDir: "saved-target", videoProfile: "best",
+      selectedVideoFormatId: null, selectedAudioFormatId: "140", selectedSubtitleKey: null, selectedSubtitleFormat: null,
+      audioBitrate: "192K", audioChannels: "stereo", embedMetadata: true, embedThumbnail: false,
+      musicQuality: "best", musicEdits: {},
+    };
+    saveWorkspace(saved);
+    const view = render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
+    const restore = screen.getByRole("checkbox", { name: "Восстанавливать открытые разделы" });
+    if (enabled) expect(restore).toBeChecked(); else expect(restore).not.toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
+    if (!enabled) {
+      expect(screen.getByRole("textbox", { name: "Ссылка на видео" })).toHaveValue("");
+      expect(window.localStorage.getItem(workspaceStorageKey)).toBeNull();
+      return;
+    }
+    expect(screen.getByRole("textbox", { name: "Ссылка на видео" })).toHaveValue(saved.urls.new);
+    expect(screen.getByRole("button", { name: "Скачать аудио" })).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "Папка загрузки" })).toHaveValue("saved-target");
+    expect(api.probeUrl).not.toHaveBeenCalled();
+    expect(api.enqueueDownload).not.toHaveBeenCalled();
+    view.unmount();
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...defaults, restoreWorkspace: true });
+    render(<App />);
+    expect(await screen.findByText("Cached video", { selector: "h2" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Папка загрузки" })).toHaveValue("saved-target");
+    expect(api.probeUrl).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Авторизация" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Использовать вход из браузера" }));
+    await waitFor(() => expect(api.probeUrl).toHaveBeenCalledWith(saved.urls.new,
+      { kind: "browser", value: { browser: "chrome", profile: null } }, expect.any(String)));
+  });
+
+  it("clears the saved workspace when restoration is switched off", async () => {
+    const defaults = await api.getSettings();
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...defaults, restoreWorkspace: true });
+    vi.mocked(api.updateSettings).mockResolvedValueOnce({ ...defaults, restoreWorkspace: false });
+    saveWorkspace(emptyWorkspace());
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Восстанавливать открытые разделы" }));
+    await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ restoreWorkspace: false }));
+    await waitFor(() => expect(window.localStorage.getItem(workspaceStorageKey)).toBeNull());
+  });
+  it.each([
+    ["Плейлист", "Добавьте ссылку на плейлист", "Здесь появится плейлист"],
+    ["YouTube Music", "Добавьте ссылку на трек", "YouTube Music"],
+  ])("keeps %s minimal until a source is analyzed", async (section, heading, preview) => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: section }));
+    expect(screen.getByRole("textbox", { name: section === "YouTube Music" ? "Ссылка YouTube Music" : "Ссылка на плейлист" }).closest(".source-url-card")).toHaveTextContent(heading);
+    expect(screen.queryByRole("tab", { name: "Трек" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Итоговая загрузка" })).not.toBeInTheDocument();
+    expect(screen.getByText(preview, { selector: ".section-empty strong" })).toBeInTheDocument();
+    if (section === "YouTube Music") {
+      const liked = screen.getByRole("button", { name: "Понравившиеся" });
+      expect(liked.closest(".url-input-heading")).not.toBeNull();
+    }
+  });
+  it.each(["new", "playlist"])("routes a musical URL from %s to YouTube Music", async (origin) => {
+    render(<App />);
+    if (origin === "playlist") await userEvent.click(screen.getByRole("button", { name: /^Плейлист$/ }));
+    const input = origin === "playlist" ? screen.getByRole("textbox", { name: "Ссылка на плейлист" }) : screen.getByLabelText(/ссылка на видео/i);
+    fireEvent.change(input, { target: { value: "https://music.youtube.com/watch?v=music-song" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "YouTube Music" })).toHaveAttribute("aria-current", "page"));
+    await waitFor(() => expect(api.probeUrl).toHaveBeenCalledWith("https://music.youtube.com/watch?v=music-song", null, expect.any(String)));
+    expect(screen.getByRole("tab", { name: "Трек" })).toHaveAttribute("aria-selected", "true");
+    expect(api.probePlaylist).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["channel", "https://music.youtube.com/@lumimusic.official", /страница исполнителя или канала пока не поддерживается/i],
+    ["radio", "https://music.youtube.com/playlist?list=RD123", /автоматическое радио пока не поддерживается/i],
+    ["other", "https://music.youtube.com/explore", /вставьте ссылку на трек, альбом или плейлист YouTube Music/i],
+  ])("explains an unsupported music source without probing it: %s", async (_kind, url, message) => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "YouTube Music" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Ссылка YouTube Music" }), { target: { value: url } });
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(api.probeUrl).not.toHaveBeenCalled();
+    expect(api.probePlaylist).not.toHaveBeenCalled();
+  });
+
+  it("opens existing authorization settings for liked music without a session", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "YouTube Music" }));
+    await userEvent.click(screen.getByRole("button", { name: "Понравившиеся" }));
+    expect(screen.getByText(/для этой коллекции войдите в YouTube/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Открыть авторизацию" }));
+    expect(await screen.findByRole("tab", { name: "Авторизация" })).toHaveAttribute("aria-selected", "true");
+    expect(api.probePlaylist).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
@@ -708,7 +925,7 @@ describe("App", () => {
     vi.mocked(api.onDownloadFinished).mockImplementationOnce(async (callback) => { onFinished = callback; return () => undefined; });
     render(<App />);
     await waitFor(() => expect(onFinished).toBeDefined());
-    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
+    await waitFor(() => expect(api.getSettings).toHaveBeenCalled());
     const completedJob: Job = {
       id: 73, state: "Completed",
       request: { url: "https://youtube.com/watch?v=sound", title: "Finished", preset: "mp4Video", destinationDir: "D:/Video" },
@@ -800,7 +1017,7 @@ describe("App", () => {
     let onUpdated!: (job: Job) => void;
     vi.mocked(api.onDownloadUpdated).mockImplementationOnce(async (callback) => { onUpdated = callback; return () => undefined; });
     render(<App />);
-    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
+    await waitFor(() => expect(api.getSettings).toHaveBeenCalled());
     await act(async () => onUpdated({ id: 76, state: "Completed", request: { url: "https://youtube.com/watch?v=late-toast", preset: "mp4Video", destinationDir: "D:/Video" } }));
     await waitFor(() => expect(finishNotification).toBeDefined());
     await userEvent.click(screen.getByRole("button", { name: /выключить уведомления/i }));
@@ -815,7 +1032,7 @@ describe("App", () => {
 
     render(<App />);
 
-    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
+    await waitFor(() => expect(api.getSettings).toHaveBeenCalled());
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     const themeButton = screen.getByRole("button", { name: /включить светлую тему/i });
     expect(themeButton.querySelector(".moon-icon")).toBeInTheDocument();
@@ -830,6 +1047,27 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
     await userEvent.click(screen.getByRole("tab", { name: "Внешний вид" }));
     expect(screen.getByRole("button", { name: "Фиолетовый" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it.each((["light", "dark"] as const).flatMap((theme) => ([
+    ["blue", "Синий"], ["purple", "Фиолетовый"], ["cyan", "Бирюзовый"],
+    ["green", "Зелёный"], ["orange", "Оранжевый"], ["pink", "Розовый"],
+  ] as const).map(([color, label]) => ({ theme, color, label }))))("applies $color from Appearance in $theme theme", async ({ theme, color, label }) => {
+    const initial = { ...await api.getSettings(), accentColor: "blue" as const };
+    vi.mocked(api.getSettings).mockResolvedValueOnce(initial);
+    vi.mocked(api.updateSettings).mockResolvedValueOnce({ ...initial, accentColor: color });
+    window.localStorage.setItem(themeStorageKey, theme);
+    render(<App />);
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme", theme));
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Внешний вид" }));
+    await userEvent.click(screen.getByRole("button", { name: label }));
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("data-accent", color));
+    expect(screen.getByRole("button", { name: label })).toHaveAttribute("aria-pressed", "true");
+    expect(api.updateSettings).toHaveBeenCalledWith({ accentColor: color });
+    await userEvent.click(screen.getByRole("button", { name: /^Плейлист$/ }));
+    expect(document.documentElement).toHaveAttribute("data-accent", color);
+    expect(document.documentElement).toHaveAttribute("data-theme", theme);
   });
 
   it("shows the analyzed video preview actions and clears the URL field", async () => {
@@ -879,13 +1117,18 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: /анализировать/i })).not.toBeInTheDocument();
   });
 
-  it("shows the best-quality profile before video formats are available", async () => {
+  it("keeps the empty preview and hides parameters until analysis succeeds", async () => {
     render(<App />);
-
-    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
-    const profile = screen.getByRole("combobox", { name: "Профиль скачивания" });
-    expect(profile).toHaveAttribute("data-value", "best");
-    expect(profile).toHaveTextContent("Лучшее качество");
+    expect(screen.getByText("Добавьте ссылку на видео")).toBeInTheDocument();
+    expect(screen.getByText("Здесь появится видео")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Профиль скачивания" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Итоговая загрузка" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/ссылка на видео/i), { target: { value: "https://youtube.com/watch?v=x" } });
+    await screen.findByText("Example Video");
+    expect(screen.getByRole("combobox", { name: "Профиль скачивания" })).toHaveAttribute("data-value", "best");
+    await userEvent.click(screen.getByRole("button", { name: "Очистить" }));
+    await screen.findByText("Здесь появится видео");
+    expect(screen.queryByRole("region", { name: "Итоговая загрузка" })).not.toBeInTheDocument();
   });
 
   it("selects a 480p profile when the video provides that quality", async () => {
@@ -1198,6 +1441,8 @@ describe("App", () => {
 
   it("shows video, audio and subtitle download modes as selectable cards", async () => {
     render(<App />);
+    fireEvent.change(screen.getByLabelText(/ссылка на видео/i), { target: { value: "https://youtube.com/watch?v=x" } });
+    await screen.findByText("Example Video");
 
     expect(screen.getByRole("tab", { name: /^Видео/ })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: /^Аудио/ })).toHaveAttribute("aria-selected", "false");
@@ -1209,7 +1454,7 @@ describe("App", () => {
     expect(screen.getByText("Настройки аудио")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("tab", { name: /^Субтитры/ }));
-    expect(screen.getByText(/нет доступных субтитров/i)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Настройки субтитров" })).toBeInTheDocument();
   });
 
   it("downloads only the selected subtitle track and format", async () => {
@@ -1367,8 +1612,8 @@ describe("App", () => {
 
   it("shows the named video profile chooser instead of quick presets", async () => {
     render(<App />);
-
-    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
+    fireEvent.change(screen.getByLabelText(/ссылка на видео/i), { target: { value: "https://youtube.com/watch?v=x" } });
+    await screen.findByText("Example Video");
     const profile = screen.getByRole("combobox", { name: "Профиль скачивания" });
     await userEvent.click(profile);
     expect(screen.getByRole("listbox", { name: "Профиль скачивания" })).toBeInTheDocument();
@@ -1834,23 +2079,20 @@ describe("App", () => {
     expect(within(browserMenu).getByRole("option", { name: "Safari" })).toBeEnabled();
   });
 
-  it("keeps download disabled until the current URL is analyzed", async () => {
+  it("keeps the download action hidden until the current URL is analyzed", async () => {
     render(<App />);
-
-    const downloadButton = await screen.findByRole("button", { name: /скачать/i });
-    expect(downloadButton).toBeDisabled();
-    expect(downloadButton).toHaveAttribute("data-analyzed", "false");
+    expect(screen.queryByRole("button", { name: /скачать/i })).not.toBeInTheDocument();
 
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=x");
-    expect(downloadButton).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /скачать/i })).not.toBeInTheDocument();
 
     await screen.findByText("Example Video");
+    const downloadButton = screen.getByRole("button", { name: /скачать/i });
     expect(downloadButton).toBeEnabled();
     expect(downloadButton).toHaveAttribute("data-analyzed", "true");
 
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "2");
-    expect(downloadButton).toBeDisabled();
-    expect(downloadButton).toHaveAttribute("data-analyzed", "false");
+    expect(screen.queryByRole("button", { name: /скачать/i })).not.toBeInTheDocument();
   });
 
   it("shows a readable error for an invalid pasted URL", async () => {
@@ -1860,13 +2102,13 @@ describe("App", () => {
 
     expect(await screen.findByText("Введите корректную ссылку YouTube.")).toBeInTheDocument();
     expect(api.probeUrl).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: /скачать/i })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /скачать/i })).not.toBeInTheDocument();
   });
 
   it("does not show or request developer tool status on the main screen", async () => {
     render(<App />);
 
-    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
+    await waitFor(() => expect(api.getSettings).toHaveBeenCalled());
     expect(screen.queryByLabelText(/статус инструментов/i)).not.toBeInTheDocument();
     expect(api.getToolStatus).not.toHaveBeenCalled();
   });
@@ -2191,7 +2433,7 @@ describe("App", () => {
   it("shows application details only in the About settings tab", async () => {
     render(<App />);
 
-    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
+    await waitFor(() => expect(api.getSettings).toHaveBeenCalled());
     expect(screen.queryByText("0.1.1")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: /настройки/i }));
@@ -2201,7 +2443,7 @@ describe("App", () => {
     const aboutPanel = screen.getByRole("tabpanel", { name: /о программе/i });
     expect(aboutPanel).toBeInTheDocument();
     expect(within(aboutPanel).getByRole("heading", { name: "YTLoadster" })).toBeInTheDocument();
-    expect(screen.getByText("0.1.2")).toBeInTheDocument();
+    expect(screen.getByText(packageMetadata.version)).toBeInTheDocument();
     expect(screen.getByText(/программа для загрузки видео, аудио и субтитров/i)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "GitHub" })).toHaveAttribute("href", "https://github.com/sailars/YTLoadster");
     expect(await screen.findByText("Установлена актуальная версия.")).toBeInTheDocument();
@@ -2405,6 +2647,73 @@ describe("App", () => {
     expect(screen.queryByRole("region", { name: /^Настройки$/ })).not.toBeInTheDocument();
   });
 
+  it("requires confirmation before resetting settings and allows Cancel and Escape", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
+    const reset = screen.getByRole("button", { name: "Сбросить все настройки" });
+    await userEvent.click(reset);
+    const dialog = screen.getByRole("alertdialog", { name: "Сбросить все настройки?" });
+    expect(dialog).toHaveTextContent("История, файлы, очередь и сохранённый вход в YouTube останутся.");
+    expect(within(dialog).getByRole("button", { name: "Отмена" })).toHaveFocus();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Отмена" }));
+    expect(reset).toHaveFocus();
+    await userEvent.click(reset);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /^Настройки$/ })).toBeInTheDocument();
+    expect(api.resetSettings).not.toHaveBeenCalled();
+  });
+
+  it("resets stored preferences immediately while retaining saved YouTube sign-in", async () => {
+    const defaults = { ...await api.getSettings(), musicAlbumFolder: true };
+    vi.mocked(api.resetSettings).mockResolvedValueOnce({ settings: defaults, defaultDestinationDir: "D:/Downloads" });
+    vi.mocked(api.getSettings).mockResolvedValueOnce({ ...defaults, minimizeToTray: false, accentColor: "purple", musicAlbumFolder: false });
+    vi.mocked(api.getYoutubeAuthStatus).mockResolvedValueOnce({ supported: true, authenticated: true });
+    window.localStorage.setItem(themeStorageKey, "dark");
+    window.localStorage.setItem(sidebarPinnedStorageKey, "true");
+    window.localStorage.setItem(notificationsStorageKey, "true");
+    window.localStorage.setItem(videoProfileStorageKey, "mp4Compatible");
+    window.localStorage.setItem(automaticUpdateChecksStorageKey, "false");
+    window.localStorage.setItem("unrelated", "keep");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Сбросить все настройки" }));
+    await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: /^Сбросить$/ }));
+    expect(await screen.findByText("Настройки сброшены.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Сбросить все настройки" })).toHaveFocus();
+    expect(api.resetSettings).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("switch", { name: "Звук при завершении загрузки" })).not.toBeChecked();
+    expect(screen.getByRole("switch", { name: /проверять обновления/i })).toBeChecked();
+    expect(document.documentElement).toHaveAttribute("data-accent", "blue");
+    expect(window.localStorage.getItem(themeStorageKey)).toBeNull();
+    expect(window.localStorage.getItem(sidebarPinnedStorageKey)).toBeNull();
+    expect(window.localStorage.getItem(videoProfileStorageKey)).toBeNull();
+    expect(window.localStorage.getItem("unrelated")).toBe("keep");
+    expect(JSON.parse(window.localStorage.getItem(browserAuthStorageKey)!)).toEqual({ useBrowserCookies: false, useYoutubeSession: true, browser: "chrome" });
+    expect(api.clearHistory).not.toHaveBeenCalled();
+    expect(api.clearYoutubeAuth).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("tab", { name: "Загрузки" }));
+    expect(screen.getByRole("textbox", { name: /папка по умолчанию/i })).toHaveValue("D:/Downloads");
+  });
+
+  it("keeps the reset dialog open on failure and prevents duplicate requests while resetting", async () => {
+    let rejectReset!: (reason: Error) => void;
+    vi.mocked(api.resetSettings).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectReset = reject; }));
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Сбросить все настройки" }));
+    await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: /^Сбросить$/ }));
+    expect(screen.getByRole("button", { name: "Сбрасываем…" })).toBeDisabled();
+    expect(screen.getByRole("alertdialog")).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    await act(async () => rejectReset(new Error("storage unavailable")));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось сбросить настройки.");
+    expect(api.resetSettings).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: /^Сбросить$/ })).toBeEnabled();
+    expect(window.localStorage.getItem(themeStorageKey)).toBeNull();
+  });
+
   it("shows and saves the sleep and tray behavior settings", async () => {
     render(<App />);
 
@@ -2443,7 +2752,8 @@ describe("App", () => {
     expect(screen.getByRole("region", { name: "Settings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Queue" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "New download" }));
-    expect(screen.getByRole("tab", { name: "Video" })).toBeInTheDocument();
+    expect(screen.getByText("Add a video URL")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Video" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Video URL")).toBeInTheDocument();
     expect(window.localStorage.getItem(localeStorageKey)).toBe("en");
     expect(document.documentElement.lang).toBe("en");
@@ -2492,6 +2802,8 @@ describe("App", () => {
 
     await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ defaultDownloadDir: "D:/Video" }));
     await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
+    fireEvent.change(screen.getByLabelText(/ссылка на видео/i), { target: { value: "https://youtube.com/watch?v=default-folder" } });
+    await screen.findByText("Example Video");
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Папка загрузки" })).toHaveValue("D:/Video"));
     await userEvent.click(screen.getByRole("button", { name: "Плейлист" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Ссылка на плейлист" }), {
@@ -2791,8 +3103,8 @@ describe("App", () => {
 
   it("uses clear preset labels", async () => {
     render(<App />);
-
-    await screen.findByDisplayValue("C:/Users/TestUser/Downloads");
+    fireEvent.change(screen.getByLabelText(/ссылка на видео/i), { target: { value: "https://youtube.com/watch?v=x" } });
+    await screen.findByText("Example Video");
 
     expect(screen.queryByText(/Видео: лучшее/i)).not.toBeInTheDocument();
     expect(screen.getByText(/Лучшее качество/i)).toBeInTheDocument();
@@ -2800,6 +3112,8 @@ describe("App", () => {
 
   it("lets the user pick a destination folder", async () => {
     render(<App />);
+    fireEvent.change(screen.getByLabelText(/ссылка на видео/i), { target: { value: "https://youtube.com/watch?v=x" } });
+    await screen.findByText("Example Video");
 
     await userEvent.click(await screen.findByRole("button", { name: /обзор/i }));
 
@@ -2843,9 +3157,9 @@ describe("App", () => {
   it("shows audio settings for audio presets and submits them", async () => {
     render(<App />);
 
-    await userEvent.click(screen.getByRole("tab", { name: /^Аудио/ }));
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=x");
     await screen.findByText("Example Video");
+    await userEvent.click(screen.getByRole("tab", { name: /^Аудио/ }));
 
     expect(screen.getByText("Настройки аудио")).toBeInTheDocument();
     await selectParameter(/битрейт/i, "320K");
@@ -2873,9 +3187,9 @@ describe("App", () => {
     });
     render(<App />);
 
-    await userEvent.click(screen.getByRole("tab", { name: /^Аудио/ }));
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=mono");
     await screen.findByText("Mono Video");
+    await userEvent.click(screen.getByRole("tab", { name: /^Аудио/ }));
 
     expect(screen.getByRole("combobox", { name: "Каналы" })).toHaveAttribute("data-value", "source");
     const menu = await openParameterMenu("Каналы");
@@ -2892,9 +3206,9 @@ describe("App", () => {
     });
     render(<App />);
 
-    await userEvent.click(screen.getByRole("tab", { name: /^Аудио/ }));
     await userEvent.type(screen.getByLabelText(/ссылка на видео/i), "https://youtube.com/watch?v=stereo");
     await screen.findByText("Stereo Video");
+    await userEvent.click(screen.getByRole("tab", { name: /^Аудио/ }));
     await selectParameter("Каналы", "mono");
 
     expect(screen.getByText("Stereo будет сведено в mono.")).toBeInTheDocument();
@@ -3413,6 +3727,35 @@ describe("App", () => {
     const queuedRows = await screen.findAllByRole("listitem");
     expect(within(queuedRows[0]).getByText("First Video")).toBeInTheDocument();
     expect(within(queuedRows[1]).getByText("Second Video")).toBeInTheDocument();
+  });
+
+  it.each([false, true])("restores downloaded collection statuses from History on each launch and forgets removed records, music=%s", async (music) => {
+    const saved = { id: "persisted-record", title: "Saved item", url: "https://youtu.be/persistent-item", preset: music ? "audioSource" : "mp4Video", historyKey: JSON.stringify(["youtube:persistent-item", music ? "audio" : "video"]) };
+    vi.mocked(api.getHistory).mockResolvedValueOnce([saved]).mockResolvedValueOnce([saved]);
+    const info = { id: "PL-persisted", title: "Restored collection", entries: [{ id: "persistent-item", index: 1, url: "https://youtube.com/watch?v=persistent-item", title: "Current item", duration: 60 }] };
+    vi.mocked(api.probePlaylist).mockResolvedValueOnce(info).mockResolvedValueOnce(info);
+    const analyzed = { entryId: "persistent-item", state: "ready" as const, media: { title: "Current item", webpageUrl: "https://music.youtube.com/watch?v=persistent-item", duration: 60,
+      videoFormats: [{ kind: "video" as const, formatId: "new-video-stream", qualityLabel: "1080p MP4", height: 1080, ext: "mp4", codec: "avc1" }],
+      audioFormats: [{ kind: "audio" as const, formatId: "new-audio-stream", qualityLabel: "OPUS", ext: "webm", codec: "opus", bitrateKbps: 160 }],
+    } };
+    vi.mocked(api.probePlaylistItem).mockImplementationOnce(async (entryId) => ({ ...analyzed, entryId })).mockImplementationOnce(async (entryId) => ({ ...analyzed, entryId }));
+    const open = async () => {
+      await userEvent.click(screen.getByRole("button", { name: music ? "YouTube Music" : "Плейлист" }));
+      fireEvent.change(screen.getByRole("textbox", { name: music ? "Ссылка YouTube Music" : "Ссылка на плейлист" }), { target: { value: `https://${music ? "music." : "www."}youtube.com/playlist?list=PL-persisted` } });
+      expect(await screen.findByText("Загружено", {}, { timeout: 3_000 })).toBeInTheDocument();
+    };
+    let view = render(<App />);
+    await open();
+    view.unmount();
+    view = render(<App />);
+    await open();
+    await userEvent.click(screen.getByRole("button", { name: "История" }));
+    const row = (await screen.findByText("Saved item")).closest("li")!;
+    await userEvent.click(within(row).getByRole("button", { name: /удалить запись/i }));
+    await waitFor(() => expect(api.removeHistoryItem).toHaveBeenCalledWith("persisted-record"));
+    await userEvent.click(screen.getByRole("button", { name: music ? "YouTube Music" : "Плейлист" }));
+    expect(await screen.findByText("Доступно")).toBeInTheDocument();
+    expect(screen.queryByText("Загружено")).not.toBeInTheDocument();
   });
 
   it("opens the destination folder from History", async () => {

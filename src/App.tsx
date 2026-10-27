@@ -1,30 +1,35 @@
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
 import packageMetadata from "../package.json";
 import { Downloader } from "./components/Downloader";
 import { History } from "./components/History";
 import { Playlist } from "./components/Playlist";
+import { YouTubeMusic } from "./components/YouTubeMusic";
 import { Queue } from "./components/Queue";
-import { Sidebar, type AppSection } from "./components/Sidebar";
+import { Sidebar, sidebarPinnedStorageKey, type AppSection } from "./components/Sidebar";
+import { videoProfileStorageKey } from "./components/downloader/videoProfiles";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { api } from "./lib/api";
 import {
   getInitialLocale,
+  getSystemLocale,
+  localeStorageKey,
   I18nProvider,
   saveLocale,
   useI18n,
   type AppLocale,
 } from "./lib/i18n";
-import { classifyYoutubeSource, videoUrlFromMixedSource } from "./lib/sourceUrl";
-import { mediaSignatureForRequest } from "./lib/playlistModel";
+import { classifyYoutubeSource, isYoutubeMusicUrl, videoUrlFromMixedSource } from "./lib/sourceUrl";
+import { historyKeysFromItems } from "./lib/historyModel";
 import {
   getInitialNotificationsEnabled,
+  notificationsStorageKey,
   requestNotificationAccess,
   saveNotificationsEnabled,
   showDownloadCompletedNotification,
   showNotificationsEnabledNotification,
 } from "./lib/notifications";
-import { applyTheme, getInitialTheme, nextThemePreference, saveTheme, systemThemeQuery, type ThemePreference } from "./lib/theme";
+import { applyTheme, getInitialTheme, nextThemePreference, saveTheme, systemThemeQuery, themeStorageKey, type ThemePreference } from "./lib/theme";
 import type {
   AppSettings,
   BrowserAuthSettings,
@@ -47,9 +52,13 @@ import {
   saveCachedUpdateCheck,
   saveAutomaticUpdateChecksEnabled,
   updateStateFromResult,
+  automaticUpdateChecksStorageKey,
+  updateCheckStorageKey,
+  dismissedUpdateStorageKey,
 } from "./lib/updates";
 import { localizedYoutubeAuthError } from "./lib/youtubeAuth";
-import { getInitialBrowserAuthSettings, saveBrowserAuthSettings } from "./lib/browserAuth";
+import { browserAuthStorageKey, getInitialBrowserAuthSettings, saveBrowserAuthSettings } from "./lib/browserAuth";
+import { clearWorkspace, emptyWorkspace, loadWorkspace, saveWorkspace, workspaceStorageKey, type Workspace, type WorkspaceKey, type WorkspaceView } from "./lib/workspace";
 
 type ThemeTransitionDocument = Document & {
   startViewTransition?: (update: () => void) => { finished: Promise<void> };
@@ -108,9 +117,32 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   const [section, setSection] = useState<AppSection>("new");
   const [newDownloadUrl, setNewDownloadUrl] = useState("");
   const [playlistUrl, setPlaylistUrl] = useState("");
+  const [musicUrl, setMusicUrl] = useState("");
+  const [musicVisited, setMusicVisited] = useState(false);
+  useEffect(() => { if (section === "music") setMusicVisited(true); }, [section]);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<"main" | "authorization">("main");
+  const [settingsResetVersion, setSettingsResetVersion] = useState(0);
+  const [restoredWorkspace, setRestoredWorkspace] = useState<Workspace | null>(null);
+  const workspaceRef = useRef<Workspace>(emptyWorkspace());
+  const workspaceEnabled = useRef(false);
+  const workspaceTimer = useRef<number | null>(null);
+  const scheduleWorkspaceSave = useCallback(() => {
+    if (!workspaceEnabled.current) return;
+    if (workspaceTimer.current !== null) window.clearTimeout(workspaceTimer.current);
+    workspaceTimer.current = window.setTimeout(() => {
+      workspaceTimer.current = null;
+      if (workspaceEnabled.current) saveWorkspace(workspaceRef.current);
+    }, 120);
+  }, []);
+  const workspaceChanged = useCallback((key: WorkspaceKey, view: WorkspaceView) => {
+    if (!workspaceEnabled.current) return;
+    // The startup snapshot passed to restored forms must keep a stable identity.
+    workspaceRef.current = { ...workspaceRef.current, views: { ...workspaceRef.current.views, [key]: view } };
+    scheduleWorkspaceSave();
+  }, [scheduleWorkspaceSave]);
   const [mixedSourcePrompt, setMixedSourcePrompt] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [finishedMediaSignatures, setFinishedMediaSignatures] = useState<Set<string>>(() => new Set());
+  const downloadedHistoryKeys = useMemo(() => historyKeysFromItems(history), [history]);
   const [repeatDraft, setRepeatDraft] = useState<{ id: string; request?: HistoryItem["request"] } | null>(null);
   const [historyWriteFailurePath, setHistoryWriteFailurePath] = useState<string | null>(null);
   const [defaultDestinationDir, setDefaultDestinationDir] = useState<string | null>(null);
@@ -162,6 +194,8 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     minimizeToTray: true,
     completionSoundEnabled: notificationsEnabled,
     showThumbnails: true,
+    musicAlbumFolder: true,
+    restoreWorkspace: false,
     accentColor: "blue",
     proxyMode: "system",
     proxyHost: "",
@@ -179,7 +213,30 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   const [youtubeAuthError, setYoutubeAuthError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!workspaceEnabled.current) return;
+    workspaceRef.current = {
+      ...workspaceRef.current,
+      urls: { new: newDownloadUrl, playlist: playlistUrl, music: musicUrl },
+      activeSection: section === "new" || section === "playlist" || section === "music" ? section : workspaceRef.current.activeSection,
+    };
+    scheduleWorkspaceSave();
+  }, [newDownloadUrl, playlistUrl, musicUrl, section, appSettings.restoreWorkspace, scheduleWorkspaceSave]);
+
+  useEffect(() => {
+    const flush = () => {
+      if (workspaceTimer.current !== null) window.clearTimeout(workspaceTimer.current);
+      workspaceTimer.current = null;
+      if (workspaceEnabled.current) saveWorkspace(workspaceRef.current);
+    };
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", flush);
+    return () => { window.removeEventListener("pagehide", flush); window.removeEventListener("beforeunload", flush); flush(); };
+  }, []);
+
+  useEffect(() => {
+    let current = true;
     applyTheme(theme);
+    const authStatusPromise = api.getYoutubeAuthStatus();
     const cachedUpdate = loadCachedUpdateCheck(packageMetadata.version);
     if (
       !automaticUpdateCheckStarted.current &&
@@ -195,36 +252,55 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
       .catch(() => setPlatform("unknown"));
     api
       .getSettings()
-      .then((settings) => setAppSettings({ ...settings, completionSoundEnabled: notificationsEnabledRef.current }))
-      .catch(() => setAppSettings({
-        concurrency: 2,
-        fragmentConcurrency: 1,
-        downloadRetries: 3,
-        fileAccessRetries: 3,
-        fragmentRetries: 3,
-        customUserAgentEnabled: false,
-        customUserAgent: "",
-        includeVideoTechnicalDetailsInFilename: false,
-        filenameTemplate: "title",
-        filenameCollisionPolicy: "rename",
-        playlistFormatSelectionMode: "strict",
-        preventSystemSleepWhileDownloading: false,
-        minimizeToTray: true,
-        completionSoundEnabled: notificationsEnabledRef.current,
-        showThumbnails: true,
-        accentColor: "blue",
-        proxyMode: "system",
-        proxyHost: "",
-        proxyPort: 0,
-        proxyUsername: "",
-        proxyPasswordSet: false,
-      }));
+      .then(async (settings) => {
+        await authStatusPromise.catch(() => undefined);
+        if (!current) return;
+        setAppSettings({ ...settings, completionSoundEnabled: notificationsEnabledRef.current });
+        const saved = settings.restoreWorkspace ? loadWorkspace() : null;
+        workspaceRef.current = saved ?? emptyWorkspace();
+        workspaceEnabled.current = settings.restoreWorkspace ?? false;
+        if (saved) {
+          setRestoredWorkspace(saved);
+          setNewDownloadUrl((current) => current || saved.urls.new);
+          setPlaylistUrl((current) => current || saved.urls.playlist);
+          setMusicUrl((current) => current || saved.urls.music);
+          setMusicVisited(Boolean(saved.urls.music));
+          setSection((current) => current === "new" ? saved.activeSection : current);
+        } else if (!settings.restoreWorkspace) clearWorkspace();
+      })
+      .catch(() => {
+        if (!current) return;
+        setAppSettings({
+          concurrency: 2,
+          fragmentConcurrency: 1,
+          downloadRetries: 3,
+          fileAccessRetries: 3,
+          fragmentRetries: 3,
+          customUserAgentEnabled: false,
+          customUserAgent: "",
+          includeVideoTechnicalDetailsInFilename: false,
+          filenameTemplate: "title",
+          filenameCollisionPolicy: "rename",
+          playlistFormatSelectionMode: "strict",
+          preventSystemSleepWhileDownloading: false,
+          minimizeToTray: true,
+          completionSoundEnabled: notificationsEnabledRef.current,
+          showThumbnails: true,
+          musicAlbumFolder: true,
+          accentColor: "blue",
+          proxyMode: "system",
+          proxyHost: "",
+          proxyPort: 0,
+          proxyUsername: "",
+          proxyPasswordSet: false,
+        });
+      });
     api.getDefaultDownloadDir()
       .then(setDefaultDestinationDir)
       .catch(() => setDefaultDestinationDir("Downloads"));
-    api
-      .getYoutubeAuthStatus()
+    authStatusPromise
       .then((status) => {
+        if (!current) return;
         setYoutubeAuthStatus(status);
         setYoutubeAuthBrowser(status.browser ?? null);
         if (status.authenticated) {
@@ -250,10 +326,6 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     });
     const unlistenFinished = api.onDownloadFinished((event) => {
       setJobs((current) => current.filter((job) => job.id !== event.job.id));
-      const finishedSignature = mediaSignatureForRequest(event.job.request);
-      if (finishedSignature) {
-        setFinishedMediaSignatures((current) => new Set(current).add(finishedSignature));
-      }
       if (event.history) {
         setHistory((current) => [event.history!, ...current.filter((item) => item.id !== event.history!.id)]);
       }
@@ -262,6 +334,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     });
 
     return () => {
+      current = false;
       youtubeAuthAttempt.current += 1;
       if (youtubeAuthPollTimer.current !== null) {
         window.clearTimeout(youtubeAuthPollTimer.current);
@@ -390,6 +463,36 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     changeTheme(nextThemePreference(theme), event.currentTarget);
   };
 
+  const resetAppSettings = async (): Promise<boolean> => {
+    try {
+      const result = await api.resetSettings();
+      workspaceEnabled.current = false;
+      if (workspaceTimer.current !== null) window.clearTimeout(workspaceTimer.current);
+      workspaceTimer.current = null;
+      workspaceRef.current = emptyWorkspace();
+      // Remove only application preferences, never unrelated WebView storage.
+      for (const key of [themeStorageKey, localeStorageKey, browserAuthStorageKey,
+        notificationsStorageKey, sidebarPinnedStorageKey, videoProfileStorageKey,
+        automaticUpdateChecksStorageKey, updateCheckStorageKey, dismissedUpdateStorageKey, workspaceStorageKey]) {
+        window.localStorage.removeItem(key);
+      }
+      applyNotificationsEnabled(false);
+      setAppSettings(result.settings);
+      setDefaultDestinationDir(result.defaultDestinationDir);
+      setTheme("system");
+      onLocaleChange(getSystemLocale());
+      const authDefaults = { ...getInitialBrowserAuthSettings(), useYoutubeSession: youtubeAuthStatus.authenticated };
+      saveBrowserAuthSettings(authDefaults);
+      setAuthSettings(authDefaults);
+      setAutomaticUpdateChecksEnabled(true);
+      setUpdateNoticeDismissed(false);
+      setSettingsResetVersion((version) => version + 1);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const updateAppSettings = (patch: SettingsPatch) => {
     if (patch.completionSoundEnabled !== undefined) {
       return changeNotifications(patch.completionSoundEnabled);
@@ -397,6 +500,15 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     return api
       .updateSettings(patch)
       .then((settings) => {
+        if (patch.restoreWorkspace !== undefined) {
+          workspaceEnabled.current = settings.restoreWorkspace ?? false;
+          if (!workspaceEnabled.current) {
+            if (workspaceTimer.current !== null) window.clearTimeout(workspaceTimer.current);
+            workspaceTimer.current = null;
+            workspaceRef.current = emptyWorkspace();
+            clearWorkspace();
+          }
+        }
         setAppSettings({ ...settings, completionSoundEnabled: notificationsEnabledRef.current });
         if (patch.defaultDownloadDir !== undefined) {
           setDefaultDestinationDir(settings.defaultDownloadDir ?? "Downloads");
@@ -667,6 +779,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
 
   function changeNewDownloadUrl(nextUrl: string) {
     const normalizedNextUrl = nextUrl.trim();
+    if (isYoutubeMusicUrl(normalizedNextUrl)) { changeMusicUrl(normalizedNextUrl); return; }
     const kind = classifyYoutubeSource(normalizedNextUrl);
     if (kind === "playlist") {
       setPlaylistUrl(normalizedNextUrl);
@@ -687,6 +800,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
 
   function changePlaylistUrl(nextUrl: string) {
     const normalizedNextUrl = nextUrl.trim();
+    if (isYoutubeMusicUrl(normalizedNextUrl)) { changeMusicUrl(normalizedNextUrl); return; }
     const kind = classifyYoutubeSource(normalizedNextUrl);
     if (kind === "video") {
       setNewDownloadUrl(normalizedNextUrl);
@@ -703,10 +817,28 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
     setPlaylistUrl(nextUrl);
   }
 
+  function changeMusicUrl(nextUrl: string) {
+    const normalized = nextUrl.trim();
+    if (normalized && !isYoutubeMusicUrl(normalized) && classifyYoutubeSource(normalized) !== "invalid") {
+      if (classifyYoutubeSource(normalized) === "playlist") changePlaylistUrl(normalized);
+      else changeNewDownloadUrl(normalized);
+      return;
+    }
+    setRepeatDraft(null);
+    setSection("music");
+    if (classifyYoutubeSource(normalized) === "mixed") { setMixedSourcePrompt(normalized); return; }
+    setMixedSourcePrompt(null);
+    setMusicUrl(nextUrl);
+  }
+
   function chooseMixedSource(kind: "video" | "playlist") {
     const url = mixedSourcePrompt;
     if (!url) return;
     const selectedUrl = kind === "video" ? videoUrlFromMixedSource(url) : url;
+    if (isYoutubeMusicUrl(selectedUrl)) {
+      setMusicUrl(kind === "playlist" ? (() => { const parsed = new URL(selectedUrl); parsed.searchParams.delete("v"); parsed.pathname = "/playlist"; return parsed.toString(); })() : selectedUrl);
+      setMixedSourcePrompt(null); setSection("music"); return;
+    }
     if (kind === "video") {
       setNewDownloadUrl(selectedUrl);
       setRepeatDraft(null);
@@ -718,6 +850,10 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
   }
 
   function repeatHistoryItem(item: HistoryItem) {
+    if (item.request?.music || isYoutubeMusicUrl(item.url)) {
+      setMusicUrl(videoUrlFromMixedSource(item.request?.url ?? item.url));
+      setRepeatDraft({ id: item.id, request: item.request }); setSection("music"); return;
+    }
     const targetUrl = item.canonicalSource ?? item.url;
     const normalizedTarget = classifyYoutubeSource(targetUrl) === "mixed"
       ? videoUrlFromMixedSource(targetUrl)
@@ -747,6 +883,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
         </header>
         <div className="application-body">
           <Sidebar
+            key={settingsResetVersion}
             active={section}
             queueCount={activeQueueCount}
             notificationsEnabled={notificationsEnabled}
@@ -755,7 +892,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             onSectionChange={setSection}
             onNotifications={() => void toggleNotifications()}
             onTheme={toggleTheme}
-            onSettings={() => setSection("settings")}
+            onSettings={() => { setSettingsInitialTab("main"); setSection("settings"); }}
           />
           <div className="application-content">
             {updateCheck.status === "available" && updateCheck.result && automaticUpdateChecksEnabled && !updateNoticeDismissed ? (
@@ -770,12 +907,16 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             ) : null}
             <div className="app-section-host" hidden={section !== "new"}>
               <Downloader
+                initialWorkspace={restoredWorkspace?.views.new?.kind === "single" ? restoredWorkspace.views.new : undefined}
+                workspacePersistenceEnabled={appSettings.restoreWorkspace}
+                workspaceKey="new" onWorkspaceChange={workspaceChanged}
+                settingsResetVersion={settingsResetVersion}
                 authSettings={authSettings}
                 defaultDestinationDir={defaultDestinationDir}
                 includeVideoTechnicalDetailsInFilename={appSettings.includeVideoTechnicalDetailsInFilename}
                 url={newDownloadUrl}
                 sourceIsVideo={sourceIsVideo}
-                repeatDraft={repeatDraft}
+                repeatDraft={repeatDraft?.request?.music ? null : repeatDraft}
                 onUrlChange={changeNewDownloadUrl}
                 onOpenQueue={() => setSection("queue")}
                 onRepeatConsumed={() => setRepeatDraft(null)}
@@ -784,6 +925,10 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             </div>
             <div className="app-section-host" hidden={section !== "playlist"}>
               <Playlist
+                initialWorkspace={restoredWorkspace?.views.playlist?.kind === "collection" ? restoredWorkspace.views.playlist : undefined}
+                workspacePersistenceEnabled={appSettings.restoreWorkspace}
+                workspaceKey="playlist" onWorkspaceChange={workspaceChanged}
+                settingsResetVersion={settingsResetVersion}
                 url={playlistUrl}
                 defaultDestinationDir={defaultDestinationDir}
                 sourceIsPlaylist={sourceIsPlaylist}
@@ -793,11 +938,14 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
                 formatSelectionMode={appSettings.playlistFormatSelectionMode}
                 showThumbnails={appSettings.showThumbnails}
                 jobs={jobs}
-                finishedMediaSignatures={finishedMediaSignatures}
+                downloadedHistoryKeys={downloadedHistoryKeys}
                 onUrlChange={changePlaylistUrl}
                 onJobsCreated={(created) => setJobs((current) => created.reduce(upsertJob, current))}
                 onOpenQueue={() => setSection("queue")}
               />
+            </div>
+            <div className="app-section-host" hidden={section !== "music"}>
+              {section === "music" || musicVisited ? <YouTubeMusic initialWorkspace={restoredWorkspace} workspacePersistenceEnabled={appSettings.restoreWorkspace} onWorkspaceChange={workspaceChanged} settingsResetVersion={settingsResetVersion} musicAlbumFolder={appSettings.musicAlbumFolder ?? true} onMusicAlbumFolderChange={(enabled) => updateAppSettings({ musicAlbumFolder: enabled })} active={section === "music"} url={musicUrl} authSettings={authSettings} authenticated={youtubeAuthStatus.authenticated} defaultDestinationDir={defaultDestinationDir} formatSelectionMode={appSettings.playlistFormatSelectionMode} showThumbnails={appSettings.showThumbnails} jobs={jobs} downloadedHistoryKeys={downloadedHistoryKeys} repeatDraft={repeatDraft?.request?.music ? repeatDraft : null} onUrlChange={changeMusicUrl} onOpenQueue={() => setSection("queue")} onOpenAuth={() => { setSettingsInitialTab("authorization"); setSection("settings"); }} onJobsCreated={(created) => setJobs((current) => created.reduce(upsertJob, current))} onRepeatConsumed={() => setRepeatDraft(null)} /> : null}
             </div>
             {section === "queue" ? (
               <Queue
@@ -827,6 +975,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
             ) : null}
             {section === "settings" ? (
               <SettingsPanel
+                initialTab={settingsInitialTab}
                 isOpen
                 settings={authSettings}
                 downloadSettings={appSettings}
@@ -853,6 +1002,7 @@ function Application({ locale, onLocaleChange }: { locale: AppLocale; onLocaleCh
                 onInstallComponentUpdate={(id) => void installComponentUpdate(id)}
                 onAutomaticUpdateChecksChange={changeAutomaticUpdateChecks}
                 onDownloadSettingsChange={updateAppSettings}
+                onResetSettings={resetAppSettings}
                 onLocaleChange={onLocaleChange}
                 onOpenExternalUrl={(url) => { void api.openExternalUrl(url).catch(() => undefined); }}
                 onClose={() => setSection("new")}

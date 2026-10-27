@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import packageMetadata from "../../package.json";
 import { useI18n, type AppLocale, type Translate, type TranslationKey } from "../lib/i18n";
 import { api } from "../lib/api";
@@ -18,6 +18,7 @@ import { ParameterSelect } from "./ParameterSelect";
 import { RiskSlider, type RiskLevel } from "./RiskSlider";
 
 type Props = {
+  initialTab?: SettingsTab;
   isOpen: boolean;
   settings: BrowserAuthSettings;
   downloadSettings: AppSettings;
@@ -32,6 +33,7 @@ type Props = {
   youtubeAuthError: string | null;
   onChange: (settings: BrowserAuthSettings) => void;
   onDownloadSettingsChange: (patch: SettingsPatch) => Promise<boolean>;
+  onResetSettings: () => Promise<boolean>;
   onThemeChange: (theme: ThemePreference, trigger: HTMLElement) => void;
   onLocaleChange: (locale: AppLocale) => void;
   onYoutubeLogin: () => void;
@@ -81,6 +83,7 @@ const componentNames: Record<ComponentId, string> = {
 const appIconUrl = new URL("../assets/app-icon.png", import.meta.url).href;
 
 export function SettingsPanel({
+  initialTab = "main",
   isOpen,
   settings,
   downloadSettings,
@@ -95,6 +98,7 @@ export function SettingsPanel({
   youtubeAuthError,
   onChange,
   onDownloadSettingsChange,
+  onResetSettings,
   onThemeChange,
   onLocaleChange,
   onYoutubeLogin,
@@ -114,6 +118,35 @@ export function SettingsPanel({
   const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<SettingsTab>("main");
   const [youtubeAuthWarningOpen, setYoutubeAuthWarningOpen] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetState, setResetState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const resetPending = useRef(false);
+  const resetButton = useRef<HTMLButtonElement>(null);
+  const resetDialog = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    if (resetOpen && resetState === "saving") resetDialog.current?.focus();
+    if (!resetOpen && resetState === "saved") resetButton.current?.focus();
+  }, [resetOpen, resetState]);
+  const closeReset = () => {
+    if (resetPending.current) return;
+    setResetOpen(false);
+    resetButton.current?.focus();
+  };
+  const confirmReset = async () => {
+    if (resetPending.current) return;
+    resetPending.current = true;
+    setResetState("saving");
+    let success = false;
+    try { success = await onResetSettings(); } catch { /* Keep the dialog available for retry. */ }
+    resetPending.current = false;
+    setResetState(success ? "saved" : "error");
+    if (success) {
+      setCustomUserAgentDraft("");
+      setProxyDraft({ mode: "system", host: "", port: "", username: "", password: "", clearPassword: false });
+      setProxySaveState("idle");
+      closeReset();
+    }
+  };
   const [customUserAgentDraft, setCustomUserAgentDraft] = useState(downloadSettings.customUserAgent);
   const [proxyDraft, setProxyDraft] = useState(() => ({
     mode: downloadSettings.proxyMode,
@@ -143,11 +176,11 @@ export function SettingsPanel({
 
   useLayoutEffect(() => {
     if (isOpen) {
-      setActiveTab("main");
+      setActiveTab(initialTab);
     } else {
       setYoutubeAuthWarningOpen(false);
     }
-  }, [isOpen]);
+  }, [isOpen, initialTab]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -155,6 +188,10 @@ export function SettingsPanel({
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       event.preventDefault();
+      if (resetOpen) {
+        closeReset();
+        return;
+      }
       if (youtubeAuthWarningOpen) {
         setYoutubeAuthWarningOpen(false);
         return;
@@ -164,7 +201,7 @@ export function SettingsPanel({
 
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
-  }, [isOpen, onClose, youtubeAuthWarningOpen]);
+  }, [isOpen, onClose, youtubeAuthWarningOpen, resetOpen]);
 
   const browserOptions = [
     { value: "chrome", label: "Chrome" },
@@ -278,6 +315,26 @@ export function SettingsPanel({
                 <SettingsSwitch role="switch" checked={automaticUpdateChecksEnabled}
                   onChange={onAutomaticUpdateChecksChange} />
               </label>
+              <div className="settings-toggle-with-help">
+                <div className="settings-toggle-copy">
+                  <span>{t("settings.restoreWorkspace")}</span>
+                  <span className="auth-help-icon" tabIndex={0} role="img"
+                    aria-label={t("settings.restoreWorkspaceHelp")}
+                    data-tooltip={t("settings.restoreWorkspaceHelp")}>?</span>
+                </div>
+                <SettingsSwitch label={t("settings.restoreWorkspace")}
+                  checked={downloadSettings.restoreWorkspace ?? false}
+                  onChange={(checked) => { void onDownloadSettingsChange({ restoreWorkspace: checked }); }} />
+              </div>
+            </section>
+            <section className="settings-section" aria-labelledby="reset-settings-title">
+              <h3 id="reset-settings-title">{t("settings.resetSection")}</h3>
+              <button ref={resetButton} type="button" className="secondary"
+                disabled={notificationPending || youtubeAuthPhase === "opening" || youtubeAuthPhase === "waiting" || resetState === "saving"}
+                onClick={() => { setResetState("idle"); setResetOpen(true); }}>
+                {t("settings.resetAll")}
+              </button>
+              {resetState === "saved" ? <p className="settings-hint" role="status">{t("settings.resetSuccess")}</p> : null}
             </section>
           </div>
         ) : activeTab === "authorization" ? (
@@ -842,6 +899,36 @@ export function SettingsPanel({
           </div>
         </div>
       </section>
+
+      {resetOpen ? (
+        <div className="dialog-backdrop" role="presentation">
+          <section ref={resetDialog} tabIndex={-1} className="compact-dialog" role="alertdialog" aria-modal="true"
+            aria-labelledby="reset-confirm-title" aria-describedby="reset-confirm-description"
+            aria-busy={resetState === "saving"}
+            onKeyDown={(event) => {
+              if (event.key !== "Tab") return;
+              const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+              if (!buttons.length) { event.preventDefault(); return; }
+              if (event.shiftKey && document.activeElement === buttons[0]) {
+                event.preventDefault(); buttons[buttons.length - 1].focus();
+              } else if (!event.shiftKey && document.activeElement === buttons[buttons.length - 1]) {
+                event.preventDefault(); buttons[0].focus();
+              }
+            }}>
+            <h3 id="reset-confirm-title">{t("settings.resetTitle")}</h3>
+            <p id="reset-confirm-description">{t("settings.resetWarning")}</p>
+            {resetState === "error" ? <p role="alert">{t("settings.resetError")}</p> : null}
+            <div className="dialog-actions">
+              <button type="button" className="secondary" autoFocus disabled={resetState === "saving"}
+                onClick={closeReset}>{t("settings.youtubeAuthNoticeCancel")}</button>
+              <button type="button" className="primary" disabled={resetState === "saving"}
+                onClick={() => void confirmReset()}>
+                {t(resetState === "saving" ? "settings.resetting" : "settings.resetConfirm")}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {youtubeAuthWarningOpen ? (
         <div className="youtube-auth-warning-backdrop">

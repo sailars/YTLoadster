@@ -1,3 +1,4 @@
+import { historyContainsRequest } from "../lib/historyModel";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "../lib/api";
@@ -39,6 +40,11 @@ import { DownloadActionButton } from "./downloader/DownloadSummaryCard";
 import { DownloadModeTabs } from "./downloader/DownloadModeTabs";
 import { UrlInput } from "./downloader/UrlInput";
 import { createVideoProfileOptions } from "./downloader/VideoDownloadOptions";
+import { MusicDownloadSummary } from "./music/MusicDownloadSummary";
+import { MusicAlbumFolderOption, MusicAudioOptions, MusicMetadataEditor, MusicModeTabs, MusicParametersGroup } from "./music/MusicControls";
+import { musicMetadata, musicCollectionKind, withMusicContext, type MusicEdits } from "../lib/musicModel";
+import { matchesPlaylistSearch, sortPlaylistRows, type PlaylistSort, type PlaylistRowStatus } from "../lib/playlistSorting";
+import type { CollectionWorkspace, WorkspaceKey, WorkspaceView } from "../lib/workspace";
 
 type Layout = "wide" | "stacked";
 type AnalysisState = "pending" | "analyzing" | "ready" | "requiresAuth" | "unavailable" | "temporaryError" | "error";
@@ -64,6 +70,14 @@ type BatchDraft = {
 };
 
 type Props = {
+  initialWorkspace?: CollectionWorkspace;
+  workspacePersistenceEnabled?: boolean;
+  workspaceKey?: WorkspaceKey;
+  onWorkspaceChange?: (key: WorkspaceKey, view: WorkspaceView) => void;
+  settingsResetVersion?: number;
+  musicMode?: boolean;
+  audioEncoders?: string[] | null;
+  sourceHeaderAction?: React.ReactNode;
   url: string;
   defaultDestinationDir?: string | null;
   sourceIsPlaylist: boolean;
@@ -72,14 +86,24 @@ type Props = {
   includeVideoTechnicalDetailsInFilename: boolean;
   formatSelectionMode: PlaylistFormatSelectionMode;
   showThumbnails?: boolean;
+  musicAlbumFolder?: boolean;
+  onMusicAlbumFolderChange?: (enabled: boolean) => Promise<boolean>;
   jobs: Job[];
-  finishedMediaSignatures: Set<string>;
+  downloadedHistoryKeys: Set<string>;
   onUrlChange: (url: string) => void;
   onJobsCreated: (jobs: Job[]) => void;
   onOpenQueue: () => void;
 };
 
 export function Playlist({
+  initialWorkspace,
+  workspacePersistenceEnabled = false,
+  workspaceKey = "playlist",
+  onWorkspaceChange,
+  settingsResetVersion = 0,
+  musicMode = false,
+  audioEncoders = null,
+  sourceHeaderAction,
   url,
   defaultDestinationDir,
   sourceIsPlaylist,
@@ -88,33 +112,69 @@ export function Playlist({
   includeVideoTechnicalDetailsInFilename,
   formatSelectionMode,
   showThumbnails = true,
+  musicAlbumFolder = true,
+  onMusicAlbumFolderChange,
   jobs,
-  finishedMediaSignatures,
+  downloadedHistoryKeys,
   onUrlChange,
   onJobsCreated,
   onOpenQueue,
 }: Props) {
   const { locale, t } = useI18n();
   const [layout, setLayout] = useState<Layout>("wide");
+  const [sort, setSort] = useState<PlaylistSort>(null);
+  const [search, setSearch] = useState("");
+  const searchInput = useRef<HTMLInputElement>(null);
   const [playlist, setPlaylist] = useState<PlaylistInfo | null>(null);
   const [rows, setRows] = useState<PlaylistRow[]>([]);
+  const restoredWorkspaceConsumed = useRef(false);
+  const restoredSource = useRef<string | null>(null);
+  const metadataUrl = useRef<string | null>(null);
+  const loadedPlaylistUrl = useRef<string | null>(null);
   const [loadingPlaylist, setLoadingPlaylist] = useState(false);
   const [playlistError, setPlaylistError] = useState<string | null>(null);
+  const musicAuthKey = musicMode ? JSON.stringify([authenticated, authSettings.useBrowserCookies, authSettings.useYoutubeSession, authSettings.browser]) : "";
   const [analysisRunning, setAnalysisRunning] = useState(false);
   const [analysisStopped, setAnalysisStopped] = useState(false);
   const [largePlaylistWarning, setLargePlaylistWarning] = useState(false);
   const [rateLimited, setRateLimited] = useState(false);
   const [diskSpace, setDiskSpace] = useState<DiskSpace | null>(null);
   const [diskSpacePending, setDiskSpacePending] = useState(false);
-  const [columnWidths, setColumnWidths] = useState<Record<Layout, PlaylistColumnWidths>>({
-    wide: { ...defaultColumnWidths },
-    stacked: { ...defaultColumnWidths },
+  const [columnWidths, setColumnWidths] = useState<Record<Layout, PlaylistColumnWidths>>(() => {
+    const initial = { ...defaultColumnWidths, duration: locale === "en" ? 96 : defaultColumnWidths.duration };
+    return { wide: { ...initial }, stacked: { ...initial } };
   });
+  useEffect(() => {
+    if (locale !== "en") return;
+    setColumnWidths((current) => {
+      const widen = (widths: PlaylistColumnWidths) => widths.duration >= 96 ? widths : {
+        ...widths, duration: 96, title: Math.max(150, widths.title - (96 - widths.duration)),
+      };
+      const wide = widen(current.wide);
+      const stacked = widen(current.stacked);
+      return wide === current.wide && stacked === current.stacked ? current : { wide, stacked };
+    });
+  }, [locale]);
   const [params, setParams] = useState<PlaylistParameters>({
     ...defaultPlaylistParameters,
+    ...(musicMode ? { musicMode: true, mode: "audio" as const, audioPreset: "audioSource" as const, audioChannels: "source" as const, embedMetadata: true, embedThumbnail: true, musicQuality: "best" } : {}),
     includeVideoTechnicalDetailsInFilename,
     formatSelectionMode,
   });
+  const appliedSettingsReset = useRef(0);
+  useEffect(() => {
+    if (appliedSettingsReset.current === settingsResetVersion) return;
+    appliedSettingsReset.current = settingsResetVersion;
+    setParams({
+      ...defaultPlaylistParameters,
+      ...(musicMode ? { musicMode: true, mode: "audio" as const, audioPreset: "audioSource" as const, audioChannels: "source" as const, embedMetadata: true, embedThumbnail: true, musicQuality: "best" } : {}),
+      audioEncoders,
+      includeVideoTechnicalDetailsInFilename,
+      formatSelectionMode,
+      destinationDir: defaultDestinationDir ?? "Downloads",
+    });
+    setCreateAlbumFolder(musicAlbumFolder);
+  }, [settingsResetVersion, musicMode, audioEncoders, includeVideoTechnicalDetailsInFilename, formatSelectionMode, defaultDestinationDir, musicAlbumFolder]);
   const [enqueueing, setEnqueueing] = useState(false);
   const [enqueueResult, setEnqueueResult] = useState<{ added: number; skipped: number; id: number } | null>(null);
   const noticeSequence = useRef(0);
@@ -125,14 +185,49 @@ export function Playlist({
   }, [enqueueResult]);
   const [duplicateDraft, setDuplicateDraft] = useState<{ draft: BatchDraft; duplicates: HistoryDuplicate[] } | null>(null);
   const [warningDraft, setWarningDraft] = useState<BatchDraft | null>(null);
+  const [musicEdits, setMusicEdits] = useState<Record<string, MusicEdits>>({});
+  const [albumEdits, setAlbumEdits] = useState<MusicEdits>({});
+  const [createAlbumFolder, setCreateAlbumFolder] = useState(musicAlbumFolder);
+  const [savingAlbumFolder, setSavingAlbumFolder] = useState(false);
+  const [albumFolderError, setAlbumFolderError] = useState(false);
+  const previousAlbumFolderPreference = useRef(musicAlbumFolder);
+  useEffect(() => {
+    if (previousAlbumFolderPreference.current === musicAlbumFolder) return;
+    previousAlbumFolderPreference.current = musicAlbumFolder;
+    setCreateAlbumFolder(musicAlbumFolder);
+  }, [musicAlbumFolder]);
+  async function changeAlbumFolder(enabled: boolean) {
+    const previous = createAlbumFolder;
+    setCreateAlbumFolder(enabled);
+    setAlbumFolderError(false);
+    if (!onMusicAlbumFolderChange) return;
+    setSavingAlbumFolder(true);
+    try {
+      if (!await onMusicAlbumFolderChange(enabled)) throw new Error("settings");
+    } catch {
+      setCreateAlbumFolder(previous);
+      setAlbumFolderError(true);
+    } finally {
+      setSavingAlbumFolder(false);
+    }
+  }
+  const [musicEditor, setMusicEditor] = useState<{ id: string; draft: MusicEdits } | null>(null);
+  useEffect(() => { if (musicMode) setParams((current) => ({ ...current, audioEncoders })); }, [audioEncoders, musicMode]);
+  useEffect(() => {
+    if (metadataUrl.current === url.trim()) return;
+    metadataUrl.current = url.trim();
+    setMusicEdits({}); setAlbumEdits({}); setMusicEditor(null);
+  }, [url]);
 
   const rowsRef = useRef(rows);
   const authSettingsRef = useRef(authSettings);
   const generationRef = useRef(0);
   const stopRef = useRef(false);
   const pendingIdsRef = useRef<string[]>([]);
-  const analysisWorkersActiveRef = useRef(false);
+  const activeAnalysisSessionRef = useRef<string | null>(null);
   const analysisSessionRef = useRef("");
+  const itemAnalysisSessionRef = useRef("");
+  const individualAnalysisIdsRef = useRef(new Set<string>());
   const cancelledAnalysisSessionsRef = useRef<Set<string>>(new Set());
   const analysisSequenceRef = useRef(0);
   const analysisRequestSequenceRef = useRef(0);
@@ -242,18 +337,37 @@ export function Playlist({
   }
 
   useEffect(() => {
+    const currentUrl = url.trim();
+    const sourceKey = JSON.stringify([sourceIsPlaylist, currentUrl, musicAuthKey]);
+    const cancelRestoredSessions = () => {
+      stopRef.current = true;
+      for (const session of [analysisSessionRef.current, itemAnalysisSessionRef.current]) {
+        cancelledAnalysisSessionsRef.current.add(session);
+        void api.cancelPlaylistAnalysis(session).catch(() => undefined);
+      }
+    };
+    // StrictMode replays mount effects; restoration must not become a fresh probe.
+    if (restoredSource.current === sourceKey && loadedPlaylistUrl.current === currentUrl) {
+      analysisSessionRef.current = nextPlaylistAnalysisId();
+      itemAnalysisSessionRef.current = `${musicMode ? "music-" : ""}playlist-item-${Date.now()}-${++analysisSequenceRef.current}`;
+      return cancelRestoredSessions;
+    }
+    restoredSource.current = null;
     generationRef.current += 1;
     const generation = generationRef.current;
     stopRef.current = true;
     pendingIdsRef.current = [];
+    individualAnalysisIdsRef.current.clear();
     setAnalysisRunning(false);
     setAnalysisStopped(false);
+    setSort(null);
+    setSearch("");
     setRateLimited(false);
     setLargePlaylistWarning(false);
     setEnqueueResult(null);
     setPlaylistError(null);
 
-    const currentUrl = url.trim();
+    loadedPlaylistUrl.current = null;
     if (!sourceIsPlaylist || !currentUrl) {
       setPlaylist(null);
       updateRows(() => []);
@@ -266,13 +380,32 @@ export function Playlist({
     updateRows(() => []);
     const analysisId = nextPlaylistAnalysisId();
     analysisSessionRef.current = analysisId;
+    const itemAnalysisId = `${musicMode ? "music-" : ""}playlist-item-${Date.now()}-${++analysisSequenceRef.current}`;
+    itemAnalysisSessionRef.current = itemAnalysisId;
+    if (!restoredWorkspaceConsumed.current && initialWorkspace?.url === currentUrl) {
+      restoredWorkspaceConsumed.current = true;
+      const saved = initialWorkspace;
+      setParams({ ...defaultPlaylistParameters, ...saved.params, audioEncoders, includeVideoTechnicalDetailsInFilename, formatSelectionMode });
+      setMusicEdits(saved.musicEdits); setAlbumEdits(saved.albumEdits);
+      setCreateAlbumFolder(saved.createAlbumFolder); setLayout(saved.layout);
+      if (saved.playlist) {
+        restoredSource.current = sourceKey;
+        loadedPlaylistUrl.current = currentUrl;
+        setPlaylist(saved.playlist);
+        updateRows(() => saved.rows.map((row) => ({ ...row, analysisState: row.analysisState === "analyzing" ? "pending" : row.analysisState })));
+        setLoadingPlaylist(false);
+        setAnalysisStopped(saved.rows.some((row) => row.analysisState === "pending" || row.analysisState === "analyzing"));
+        return cancelRestoredSessions;
+      }
+    }
     const timer = window.setTimeout(async () => {
       try {
         const info = await api.probePlaylist(currentUrl, makeCookieSource(authSettingsRef.current), analysisId);
         if (generation !== generationRef.current) return;
+        loadedPlaylistUrl.current = currentUrl;
         setPlaylist(info);
-        const initialRows = info.entries.map((entry) => ({
-          entry,
+        const initialRows = info.entries.map((entry, position) => ({
+          entry: musicMode ? { ...entry, id: `${position}:${entry.id}` } : entry,
           selected: true,
           analysisState: "pending" as const,
           media: null,
@@ -282,17 +415,18 @@ export function Playlist({
         }));
         rowsRef.current = initialRows;
         setRows(initialRows);
-        if (initialRows.length > 50) {
+        if (initialRows.length > 50 || initialWorkspace?.url === currentUrl) {
           stopRef.current = true;
           setAnalysisStopped(true);
-          setLargePlaylistWarning(true);
+          setLargePlaylistWarning(initialRows.length > 50);
         } else {
           beginAnalysis(initialRows.map((row) => row.entry.id), generation);
         }
       } catch (error) {
         if (generation === generationRef.current) {
-          setPlaylistError(localizedYoutubeAuthError(String(error), t)
-            ?? (isAnalysisTimeout(error) ? t("error.analysisTimeout") : t("playlist.loadError")));
+          const issue = error as ProbeIssue;
+          setPlaylistError(localizedYoutubeAuthError(issue?.message ?? String(error), t)
+            ?? (isAnalysisTimeout(issue?.message ?? error) ? t("error.analysisTimeout") : issue?.code ? t(`playlist.issue.${issue.code}` as TranslationKey) : isAnalysisTimeout(error) ? t("error.analysisTimeout") : t("playlist.loadError")));
         }
       } finally {
         if (generation === generationRef.current) setLoadingPlaylist(false);
@@ -304,11 +438,24 @@ export function Playlist({
       stopRef.current = true;
       cancelledAnalysisSessionsRef.current.add(analysisId);
       void api.cancelPlaylistAnalysis(analysisId).catch(() => undefined);
+      cancelledAnalysisSessionsRef.current.add(itemAnalysisId);
+      void api.cancelPlaylistAnalysis(itemAnalysisId).catch(() => undefined);
     };
-  }, [sourceIsPlaylist, url]);
+  }, [sourceIsPlaylist, url, musicAuthKey, initialWorkspace]);
+
+  useEffect(() => {
+    if (!workspacePersistenceEnabled || !sourceIsPlaylist || !url.trim()) return;
+    const { audioEncoders: _encoders, ...savedParams } = params;
+    const current = loadedPlaylistUrl.current === url.trim();
+    onWorkspaceChange?.(workspaceKey, {
+      kind: "collection", url: url.trim(), playlist: current ? playlist : null,
+      rows: current ? rows.map((row) => ({ entry: row.entry, selected: row.selected, analysisState: row.analysisState, media: row.media ?? null })) : [],
+      params: savedParams, musicEdits, albumEdits, createAlbumFolder, layout,
+    });
+  }, [workspacePersistenceEnabled, workspaceKey, onWorkspaceChange, sourceIsPlaylist, url, playlist, rows, params, musicEdits, albumEdits, createAlbumFolder, layout]);
 
   function nextPlaylistAnalysisId() {
-    return `playlist-${Date.now()}-${++analysisSequenceRef.current}`;
+    return `${musicMode ? "music-playlist" : "playlist"}-${Date.now()}-${++analysisSequenceRef.current}`;
   }
 
   const analyzedMedia = useMemo(
@@ -316,23 +463,44 @@ export function Playlist({
     [rows],
   );
   const formatOptions = useMemo(() => aggregatePlaylistFormats(analyzedMedia), [analyzedMedia]);
+  const filteredRows = useMemo(() => !search.trim() ? rows : rows.filter((row) => {
+    const tags = musicMode && row.media ? { ...musicMetadata(row.media), ...musicEdits[row.entry.id] } : null;
+    return matchesPlaylistSearch(search, tags?.title ?? row.entry.title, tags?.artist ?? row.media?.uploader ?? playlist?.uploader ?? "");
+  }), [rows, search, musicMode, musicEdits, playlist]);
+  const visibleIds = new Set(filteredRows.map((row) => row.entry.id));
   const resolvedRows = useMemo(() => new Map(rows.map((row) => [
     row.entry.id,
     row.media && row.analysisState === "ready"
-      ? resolvePlaylistItem(row.media, params, row.entry.url, makeCookieSource(authSettings))
+      ? resolveRow(row)
       : null,
-  ])), [rows, params, authSettings]);
+  ])), [rows, params, authSettings, musicEdits, albumEdits, playlist, url, createAlbumFolder]);
+  function resolveRow(row: PlaylistRow) {
+    if (!row.media) return null;
+    const resolved = resolvePlaylistItem(row.media, params, row.entry.url, makeCookieSource(authSettings));
+    if (musicMode && resolved.request && playlist) {
+      resolved.request = withMusicContext(resolved.request, row.media, musicEdits[row.entry.id], { kind: musicCollectionKind(url, playlist), title: playlist.title, index: row.entry.index, albumEdits, createAlbumFolder }, params.musicQuality);
+    }
+    return resolved;
+  }
   const selectedCount = rows.filter((row) => row.selected).length;
-  const downloadableSelectedCount = rows.filter((row) => {
-    if (!row.selected) return false;
+  const activeSignatures = new Set(jobs.filter((job) => job.state === "Pending" || job.state === "Running" || job.state === "Paused").map((job) => mediaSignatureForRequest(job.request)));
+  function eligibleForBatch(row: PlaylistRow) {
+    const request = resolvedRows.get(row.entry.id)?.request;
+    return row.selected && row.analysisState !== "pending" && row.analysisState !== "analyzing"
+      && (!request || !activeSignatures.has(mediaSignatureForRequest(request)));
+  }
+  const downloadableRows = rows.filter((row) => {
+    if (!eligibleForBatch(row)) return false;
     const resolved = resolvedRows.get(row.entry.id);
     return Boolean(resolved?.available && resolved.request);
-  }).length;
+  });
+  const downloadableSelectedCount = downloadableRows.length;
+  const batchSizeSummary = summarizePlaylistSize(downloadableRows.map((row) => ({ selected: true, analyzing: false, resolved: resolvedRows.get(row.entry.id) })));
   const analyzedCount = rows.filter((row) => row.analysisState !== "pending" && row.analysisState !== "analyzing").length;
   const selectedAnalysisComplete = selectedCount > 0 && rows
     .filter((row) => row.selected)
     .every((row) => row.analysisState !== "pending" && row.analysisState !== "analyzing");
-  const readyForBatch = selectedAnalysisComplete && downloadableSelectedCount > 0;
+  const readyForBatch = downloadableSelectedCount > 0;
   const exactSelectedCount = rows.filter((row) => {
     if (!row.selected) return false;
     const resolved = resolvedRows.get(row.entry.id);
@@ -394,13 +562,13 @@ export function Playlist({
 
   function launchAnalysisWorkers(generation: number) {
     if (
-      analysisWorkersActiveRef.current
+      activeAnalysisSessionRef.current === analysisSessionRef.current
       || stopRef.current
       || generation !== generationRef.current
       || pendingIdsRef.current.length === 0
     ) return;
-    analysisWorkersActiveRef.current = true;
     const analysisId = analysisSessionRef.current;
+    activeAnalysisSessionRef.current = analysisId;
     void (async () => {
       try {
         await api.beginPlaylistAnalysis(analysisId);
@@ -413,8 +581,12 @@ export function Playlist({
           analysisWorker(generation, analysisId),
           analysisWorker(generation, analysisId),
         ]);
+      } catch {
+        if (generation === generationRef.current && analysisId === analysisSessionRef.current) stopAnalysis();
       } finally {
-        analysisWorkersActiveRef.current = false;
+        if (activeAnalysisSessionRef.current !== analysisId) return;
+        activeAnalysisSessionRef.current = null;
+        if (generation !== generationRef.current || analysisId !== analysisSessionRef.current) return;
         if (
           !stopRef.current
           && pendingIdsRef.current.length > 0
@@ -444,13 +616,14 @@ export function Playlist({
         : candidate));
 
       const requestId = `item-${++analysisRequestSequenceRef.current}`;
-      let result = await api.probePlaylistItem(
-        entryId,
-        row.entry.url,
-        makeCookieSource(authSettingsRef.current),
-        analysisId,
-        requestId,
-      );
+      const probe = async (): Promise<PlaylistItemAnalysis> => {
+        try {
+          return await api.probePlaylistItem(entryId, row.entry.url, makeCookieSource(authSettingsRef.current), analysisId, requestId);
+        } catch (error) {
+          return { entryId, state: "temporaryError", media: null, issue: { code: "network", message: String(error), retryable: true, requiresAuth: false } };
+        }
+      };
+      let result = await probe();
       if (
         generation !== generationRef.current
         || analysisId !== analysisSessionRef.current
@@ -463,14 +636,8 @@ export function Playlist({
         && (result.issue?.code === "network" || result.issue?.code === "forbidden")
       ) {
         await delay(900);
-        if (generation === generationRef.current && !stopRef.current) {
-          result = await api.probePlaylistItem(
-            entryId,
-            row.entry.url,
-            makeCookieSource(authSettingsRef.current),
-            analysisId,
-            requestId,
-          );
+        if (generation === generationRef.current && analysisId === analysisSessionRef.current && !cancelledAnalysisSessionsRef.current.has(analysisId) && !stopRef.current) {
+          result = await probe();
         }
       }
       if (
@@ -480,9 +647,8 @@ export function Playlist({
       ) return;
       applyAnalysisResult(result);
       if (result.issue?.code === "rateLimited") {
-        stopRef.current = true;
+        stopAnalysis();
         setRateLimited(true);
-        setAnalysisStopped(true);
       }
     }
   }
@@ -508,12 +674,40 @@ export function Playlist({
       : row));
   }
 
+  async function analyzeItem(entryId: string) {
+    const row = rowsRef.current.find((candidate) => candidate.entry.id === entryId);
+    if (!row || row.analysisState === "ready" || row.analysisState === "unavailable" || row.analysisState === "analyzing" || individualAnalysisIdsRef.current.has(entryId)) return;
+    const generation = generationRef.current;
+    const analysisId = itemAnalysisSessionRef.current;
+    const isCurrent = () => generation === generationRef.current && analysisId === itemAnalysisSessionRef.current && !cancelledAnalysisSessionsRef.current.has(analysisId);
+    individualAnalysisIdsRef.current.add(entryId);
+    pendingIdsRef.current = pendingIdsRef.current.filter((id) => id !== entryId);
+    updateRows((current) => current.map((candidate) => candidate.entry.id === entryId
+      ? { ...candidate, analysisState: "analyzing", issue: null, rejection: null }
+      : candidate));
+    try {
+      await api.beginPlaylistAnalysis(analysisId);
+      if (!isCurrent()) return;
+      const result = await api.probePlaylistItem(entryId, row.entry.url, makeCookieSource(authSettingsRef.current), analysisId, `item-${++analysisRequestSequenceRef.current}`);
+      if (!isCurrent()) return;
+      applyAnalysisResult(result);
+      if (result.issue?.code === "rateLimited") {
+        stopAnalysis();
+        setRateLimited(true);
+      }
+    } catch (error) {
+      if (isCurrent()) applyAnalysisResult({ entryId, state: "temporaryError", media: null, issue: { code: "network", message: String(error), retryable: true, requiresAuth: false } });
+    } finally {
+      if (isCurrent()) individualAnalysisIdsRef.current.delete(entryId);
+    }
+  }
+
   function stopAnalysis() {
     stopRef.current = true;
     setAnalysisStopped(true);
     setAnalysisRunning(false);
     cancelledAnalysisSessionsRef.current.add(analysisSessionRef.current);
-    updateRows((current) => current.map((row) => row.analysisState === "analyzing"
+    updateRows((current) => current.map((row) => row.analysisState === "analyzing" && !individualAnalysisIdsRef.current.has(row.entry.id)
       ? { ...row, analysisState: "pending" }
       : row));
     if (analysisSessionRef.current) {
@@ -522,6 +716,9 @@ export function Playlist({
   }
 
   function resumeAnalysis() {
+    updateRows((current) => current.map((row) => row.analysisState === "analyzing" && !individualAnalysisIdsRef.current.has(row.entry.id)
+      ? { ...row, analysisState: "pending" }
+      : row));
     const ids = rowsRef.current
       .filter((row) => row.analysisState === "pending" || row.analysisState === "temporaryError")
       .map((row) => row.entry.id);
@@ -542,15 +739,15 @@ export function Playlist({
   }
 
   function toggleAll() {
-    const selectable = rows.filter((row) => row.analysisState !== "unavailable");
+    const selectable = filteredRows.filter((row) => row.analysisState !== "unavailable");
     const allSelected = selectable.length > 0 && selectable.every((row) => row.selected);
-    updateRows((current) => current.map((row) => row.analysisState === "unavailable"
+    updateRows((current) => current.map((row) => row.analysisState === "unavailable" || !visibleIds.has(row.entry.id)
       ? row
       : { ...row, selected: !allSelected, rejection: null }));
   }
 
   function setSelectedRows(selectedIds: Set<string>) {
-    updateRows((current) => current.map((row) => row.analysisState === "unavailable"
+    updateRows((current) => current.map((row) => row.analysisState === "unavailable" || !visibleIds.has(row.entry.id)
       ? row
       : { ...row, selected: selectedIds.has(row.entry.id), rejection: null }));
   }
@@ -572,7 +769,7 @@ export function Playlist({
 
   async function prepareBatch() {
     if (!readyForBatch || enqueueing) return;
-    const selectedRows = rows.filter((row) => row.selected);
+    const selectedRows = rows.filter(eligibleForBatch);
     const candidates: BatchDownloadItem[] = [];
     let warnings = 0;
     for (const row of selectedRows) {
@@ -662,35 +859,64 @@ export function Playlist({
     }
   }
 
+  const collectionKind = musicMode && playlist ? musicCollectionKind(url, playlist) : undefined;
+  const albumSource = playlist ? analyzedMedia[0] ?? { title: playlist.title, uploader: playlist.uploader, videoFormats: [], audioFormats: [] } : null;
+  const albumMetadata = collectionKind === "album" && playlist && albumSource && (analyzedMedia.length > 0 || Object.keys(albumEdits).length > 0)
+    ? { ...musicMetadata(albumSource), album: albumSource.music?.album || playlist.title, albumArtist: musicMetadata(albumSource).albumArtist || musicMetadata(albumSource).artist, ...albumEdits }
+    : null;
+  const albumFolderOption = albumMetadata ? <MusicAlbumFolderOption
+    baseDir={params.destinationDir} albumArtist={albumMetadata.albumArtist} album={albumMetadata.album}
+    checked={createAlbumFolder} disabled={savingAlbumFolder} error={albumFolderError}
+    onChange={(enabled) => void changeAlbumFolder(enabled)}
+  /> : null;
+  const duplicateIds = new Set(duplicateDraft?.duplicates.map((item) => item.clientId));
+  const hasNewItems = duplicateDraft?.draft.items.some((item) => !duplicateIds.has(item.clientId)) ?? false;
+  const editingMusicRow = musicEditor ? rows.find((row) => row.entry.id === musicEditor.id) : undefined;
+  const summaryUnderPreview = musicMode || layout === "wide";
+  const searchControl = <div className="playlist-search">
+    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></svg>
+    <input ref={searchInput} type="search" aria-label={t("playlist.search")} placeholder={t("playlist.search")}
+      value={search} autoComplete="off" spellCheck={false} onChange={(event) => setSearch(event.target.value)}
+      onKeyDown={(event) => { if (event.key === "Escape" && search) { event.preventDefault(); event.stopPropagation(); setSearch(""); } }} />
+    {search ? <><span className="playlist-search-count" role="status">{t("playlist.searchCount", { count: filteredRows.length, total: rows.length })}</span>
+      <button type="button" className="playlist-search-clear" aria-label={t("playlist.clearSearch")} title={t("playlist.clearSearch")}
+        onClick={() => { setSearch(""); searchInput.current?.focus(); }}>×</button></> : null}
+  </div>;
+  const downloadSummary = <PlaylistDownloadSummary
+    musicMode={musicMode} compact={!musicMode && layout === "wide"} params={params} setParams={setParams}
+    selectedCount={downloadableSelectedCount} sizeSummary={batchSizeSummary}
+    readyForBatch={readyForBatch} selectedAnalysisPending={selectedCount > 0 && !selectedAnalysisComplete}
+    enqueueing={enqueueing} enqueueResult={enqueueResult}
+    onDestination={chooseDestination} onEnqueue={() => void prepareBatch()}
+    onOpenQueue={onOpenQueue} onDismissResult={() => setEnqueueResult(null)}
+  />;
   const parameterPanel = (
     <PlaylistParametersPanel
+      musicMode={musicMode}
+      summary={summaryUnderPreview ? null : downloadSummary}
+      metadataEditor={albumMetadata ? params.mode === "audio"
+        ? <MusicMetadataEditor albumOnly value={albumMetadata} onChange={(patch) => setAlbumEdits((current) => ({ ...current, ...patch }))} onReset={() => setAlbumEdits({})}>{albumFolderOption}</MusicMetadataEditor>
+        : <section className="music-tags music-album-folder-card">{albumFolderOption}</section>
+        : null}
       params={params}
       setParams={setParams}
       media={analyzedMedia}
       options={formatOptions}
-      selectedCount={downloadableSelectedCount}
       dense={layout === "stacked"}
-      sizeSummary={sizeSummary}
-      readyForBatch={readyForBatch}
-      selectedAnalysisPending={selectedCount > 0 && !selectedAnalysisComplete}
-      enqueueing={enqueueing}
-      enqueueResult={enqueueResult}
       onModeChange={setMode}
-      onDestination={chooseDestination}
-      onEnqueue={() => void prepareBatch()}
-      onOpenQueue={onOpenQueue}
-      onDismissResult={() => setEnqueueResult(null)}
     />
   );
 
   return (
-    <section className="playlist-view section-view" aria-label={t("playlist.label")}>
-      <div className="playlist-url-card">
+    <section className={musicMode ? "playlist-view section-view music-collection" : "playlist-view section-view"} aria-label={t(musicMode ? "nav.music" : "playlist.label")}>
+      <div className="playlist-url-card source-url-card">
         <UrlInput
-          id="playlist-url"
-          label={t("playlist.url")}
+          id={musicMode ? "music-collection-url" : "playlist-url"}
+          label={t(musicMode ? "music.url" : "playlist.url")}
+          heading={t(musicMode ? "music.addUrl" : "playlist.addUrl")}
+          headerAction={sourceHeaderAction}
           value={url}
-          placeholder={t("playlist.urlPlaceholder")}
+          placeholder={t(musicMode ? "music.urlPlaceholder" : "playlist.urlPlaceholder")}
           pasteLabel={t("media.paste")}
           pasteTooltip={t("media.pasteTooltip")}
           clearLabel={t("media.clear")}
@@ -724,10 +950,56 @@ export function Playlist({
               <button type="button" className="secondary" disabled={analysisRunning} onClick={resumeAnalysis}>{t("playlist.continueLater")}</button>
             </div>
           ) : null}
-          {layout === "wide" ? (
+          {musicMode ? (
+            <div className="music-collection-layout">
+              <div className="music-collection-content playlist-list-card">
+                <PlaylistHeader
+                  playlist={playlist}
+                  rows={rows}
+                  selected={selectedCount}
+                  selectedSize={selectedSizeText}
+                  diskSpace={diskSpaceText}
+                  matchSummary={matchSummary}
+                  showThumbnails={showThumbnails}
+                  musicKind={collectionKind}
+                  musicArtist={collectionKind === "album" ? albumEdits.albumArtist ?? (analyzedMedia[0]?.music?.albumArtist || analyzedMedia[0]?.music?.artist || playlist.uploader) : t("music.variousArtists")}
+                />
+                {downloadSummary}
+                <PlaylistAnalysisBar analyzed={analyzedCount} total={rows.length} running={analysisRunning} stopped={analysisStopped} onStop={stopAnalysis} onResume={resumeAnalysis} />
+                {searchControl}
+                <PlaylistTable
+                  rows={filteredRows}
+                  emptyLabel={search.trim() ? t("playlist.searchEmpty") : undefined}
+                  sort={sort}
+                  onSort={setSort}
+                  resolved={resolvedRows}
+                  jobs={jobs}
+                  downloadedHistoryKeys={downloadedHistoryKeys}
+                  columnWidths={activeColumnWidths}
+                  resizable
+                  autoFit={!fittedColumnLayoutsRef.current.has(layout)}
+                  locale={locale}
+                  showThumbnails={showThumbnails}
+                  musicKind={collectionKind}
+                  musicEdits={musicEdits}
+                  onEditMusic={(id) => setMusicEditor({ id, draft: { ...musicEdits[id] } })}
+                  onAnalyzeItem={(id) => void analyzeItem(id)}
+                  onInitialFit={fitColumns}
+                  onResize={resizeColumns}
+                  onToggle={toggleRow}
+                  onSelectionChange={setSelectedRows}
+                  onToggleAll={toggleAll}
+                />
+              </div>
+              <div className="playlist-parameters-card">
+                {parameterPanel}
+              </div>
+            </div>
+          ) : layout === "wide" ? (
             <div className="playlist-wide-layout">
-              <div className="playlist-list-card">
+              <div className="playlist-list-card playlist-inline-summary-content">
                 <PlaylistHeader playlist={playlist} rows={rows} selected={selectedCount} selectedSize={selectedSizeText} diskSpace={diskSpaceText} matchSummary={matchSummary} layout={layout} showThumbnails={showThumbnails} onLayout={() => setLayout("stacked")} />
+                {downloadSummary}
                 <PlaylistAnalysisBar
                   analyzed={analyzedCount}
                   total={rows.length}
@@ -736,16 +1008,21 @@ export function Playlist({
                   onStop={stopAnalysis}
                   onResume={resumeAnalysis}
                 />
+                {searchControl}
                 <PlaylistTable
-                  rows={rows}
+                  rows={filteredRows}
+                  emptyLabel={search.trim() ? t("playlist.searchEmpty") : undefined}
+                  sort={sort}
+                  onSort={setSort}
                   resolved={resolvedRows}
                   jobs={jobs}
-                  finishedMediaSignatures={finishedMediaSignatures}
+                  downloadedHistoryKeys={downloadedHistoryKeys}
                   columnWidths={activeColumnWidths}
                   resizable
                   autoFit={!fittedColumnLayoutsRef.current.has(layout)}
                   locale={locale}
                   showThumbnails={showThumbnails}
+                  onAnalyzeItem={(id) => void analyzeItem(id)}
                   onInitialFit={fitColumns}
                   onResize={resizeColumns}
                   onToggle={toggleRow}
@@ -767,17 +1044,22 @@ export function Playlist({
                   onStop={stopAnalysis}
                   onResume={resumeAnalysis}
                 />
+                {searchControl}
                 <PlaylistTable
-                  rows={rows}
+                  rows={filteredRows}
+                  emptyLabel={search.trim() ? t("playlist.searchEmpty") : undefined}
+                  sort={sort}
+                  onSort={setSort}
                   resolved={resolvedRows}
                   jobs={jobs}
-                  finishedMediaSignatures={finishedMediaSignatures}
+                  downloadedHistoryKeys={downloadedHistoryKeys}
                   columnWidths={activeColumnWidths}
                   resizable
                   compact
                   autoFit={!fittedColumnLayoutsRef.current.has(layout)}
                   locale={locale}
                   showThumbnails={showThumbnails}
+                  onAnalyzeItem={(id) => void analyzeItem(id)}
                   onInitialFit={fitColumns}
                   onResize={resizeColumns}
                   onToggle={toggleRow}
@@ -790,6 +1072,23 @@ export function Playlist({
           )}
         </>
       ) : null}
+
+      {musicEditor && editingMusicRow?.media ? <div className="dialog-backdrop" role="presentation">
+        <section className="compact-dialog" role="dialog" aria-modal="true" aria-label={t("music.tags")}>
+          <MusicMetadataEditor
+            value={{ ...musicMetadata(editingMusicRow.media), ...musicEditor.draft }}
+            onChange={(patch) => setMusicEditor((current) => current ? { ...current, draft: { ...current.draft, ...patch } } : null)}
+            onReset={() => setMusicEditor((current) => current ? { ...current, draft: {} } : null)}
+          />
+          <div className="dialog-actions">
+            <button type="button" className="secondary" onClick={() => setMusicEditor(null)}>{t("common.cancel")}</button>
+            <button type="button" className="primary" onClick={() => {
+              setMusicEdits((current) => ({ ...current, [musicEditor.id]: musicEditor.draft }));
+              setMusicEditor(null);
+            }}>{t("music.done")}</button>
+          </div>
+        </section>
+      </div> : null}
 
       {largePlaylistWarning ? (
         <div className="dialog-backdrop" role="presentation">
@@ -807,12 +1106,12 @@ export function Playlist({
       {duplicateDraft ? (
         <div className="dialog-backdrop" role="presentation">
           <section className="compact-dialog playlist-duplicates-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-duplicates-title">
-            <h3 id="playlist-duplicates-title">{t("playlist.historyDuplicatesTitle")}</h3>
-            <p>{t("playlist.historyDuplicatesText", { count: duplicateDraft.duplicates.length })}</p>
+            <h3 id="playlist-duplicates-title">{t(hasNewItems ? "playlist.historyDuplicatesTitle" : "playlist.allHistoryDuplicatesTitle")}</h3>
+            <p>{t(hasNewItems ? "playlist.historyDuplicatesText" : "playlist.allHistoryDuplicatesText", { count: duplicateIds.size })}</p>
             <div className="dialog-actions three-actions">
               <button type="button" className="secondary" onClick={() => setDuplicateDraft(null)}>{t("common.cancel")}</button>
-              <button type="button" className="secondary" onClick={() => continueAfterDuplicate(true)}>{t("playlist.downloadAgain")}</button>
-              <button type="button" className="primary" onClick={() => continueAfterDuplicate(false)}>{t("playlist.skipDuplicates")}</button>
+              <button type="button" className={hasNewItems ? "secondary" : "primary"} onClick={() => continueAfterDuplicate(true)}>{t("playlist.downloadAgain")}</button>
+              {hasNewItems ? <button type="button" className="primary" onClick={() => continueAfterDuplicate(false)}>{t("playlist.skipDuplicates")}</button> : null}
             </div>
           </section>
         </div>
@@ -834,12 +1133,26 @@ export function Playlist({
   );
 }
 
-function PlaylistHeader({ playlist, rows, selected, selectedSize, diskSpace, matchSummary, layout, showThumbnails, onLayout }: { playlist: PlaylistInfo; rows: PlaylistRow[]; selected: number; selectedSize: string; diskSpace: string; matchSummary: string | null; layout: Layout; showThumbnails: boolean; onLayout: () => void }) {
+function PlaylistHeader({ playlist, rows, selected, selectedSize, diskSpace, matchSummary, layout, showThumbnails, musicKind, musicArtist, onLayout }: {
+  playlist: PlaylistInfo;
+  rows: PlaylistRow[];
+  selected: number;
+  selectedSize: string;
+  diskSpace: string;
+  matchSummary: string | null;
+  layout?: Layout;
+  showThumbnails: boolean;
+  musicKind?: ReturnType<typeof musicCollectionKind>;
+  musicArtist?: string | null;
+  onLayout?: () => void;
+}) {
   const { t } = useI18n();
   const fallbackThumbnail = rows.find((row) => row.media?.thumbnail || row.entry.thumbnail);
+  const artist = musicKind ? musicArtist : playlist.uploader;
   return (
-    <div className="playlist-header-card">
+    <div className={`playlist-header-card${musicKind ? " music-collection-header" : ""}`}>
       {showThumbnails ? <MediaThumbnail
+        zoomable={Boolean(musicKind)}
         src={playlist.thumbnail ?? fallbackThumbnail?.media?.thumbnail ?? fallbackThumbnail?.entry.thumbnail}
         mediaUrl={fallbackThumbnail?.entry.url}
         alt={playlist.title}
@@ -847,15 +1160,16 @@ function PlaylistHeader({ playlist, rows, selected, selectedSize, diskSpace, mat
         placeholderClassName="playlist-cover-placeholder"
       /> : null}
       <div className="playlist-header-copy">
+        {musicKind ? <span>{t(`music.${musicKind}`)}</span> : null}
         <strong title={playlist.title}>{playlist.title}</strong>
-        {playlist.uploader ? <span>{playlist.uploader}</span> : null}
-        <span>{t("playlist.itemCount", { count: playlist.entries.length })}{playlist.totalDuration ? ` · ${formatDuration(playlist.totalDuration)}` : ""}</span>
+        {artist ? <span>{artist}</span> : null}
+        <span>{t(musicKind ? "music.trackCount" : "playlist.itemCount", { count: playlist.entries.length })}{playlist.totalDuration ? ` · ${formatDuration(playlist.totalDuration)}` : ""}</span>
         <span>{t("playlist.selectedSummary", { selected, total: playlist.entries.length, size: selectedSize, space: diskSpace })}</span>
         {matchSummary ? <span className="playlist-match-summary">{matchSummary}</span> : null}
       </div>
-      <button type="button" className="layout-switch" title={layout === "wide" ? t("playlist.layoutStacked") : t("playlist.layoutWide")} aria-label={layout === "wide" ? t("playlist.layoutStacked") : t("playlist.layoutWide")} onClick={onLayout}>
+      {onLayout ? <button type="button" className="layout-switch" title={layout === "wide" ? t("playlist.layoutStacked") : t("playlist.layoutWide")} aria-label={layout === "wide" ? t("playlist.layoutStacked") : t("playlist.layoutWide")} onClick={onLayout}>
         {layout === "wide" ? <StackedLayoutIcon /> : <WideLayoutIcon />}
-      </button>
+      </button> : null}
     </div>
   );
 }
@@ -877,16 +1191,23 @@ function PlaylistAnalysisBar({ analyzed, total, running, stopped, onStop, onResu
 }
 
 function PlaylistTable({
-  rows,
+  rows: sourceRows,
+  emptyLabel,
+  sort,
+  onSort,
   resolved,
   jobs,
-  finishedMediaSignatures,
+  downloadedHistoryKeys,
   columnWidths,
   resizable,
   autoFit = false,
   compact = false,
   locale,
   showThumbnails,
+  musicKind,
+  musicEdits,
+  onEditMusic,
+  onAnalyzeItem,
   onInitialFit,
   onResize,
   onToggle,
@@ -894,15 +1215,22 @@ function PlaylistTable({
   onToggleAll,
 }: {
   rows: PlaylistRow[];
+  emptyLabel?: string;
+  sort: PlaylistSort;
+  onSort: (sort: PlaylistSort) => void;
   resolved: Map<string, ResolvedPlaylistItem | null>;
   jobs: Job[];
-  finishedMediaSignatures: Set<string>;
+  downloadedHistoryKeys: Set<string>;
   columnWidths: PlaylistColumnWidths;
   resizable: boolean;
   autoFit?: boolean;
   compact?: boolean;
   locale: "ru" | "en";
   showThumbnails: boolean;
+  musicKind?: "album" | "playlist" | "liked";
+  musicEdits?: Record<string, MusicEdits>;
+  onEditMusic?: (id: string) => void;
+  onAnalyzeItem?: (id: string) => void;
   onInitialFit?: (widths: PlaylistColumnWidths) => void;
   onResize: (widths: PlaylistColumnWidths) => void;
   onToggle: (id: string) => void;
@@ -910,8 +1238,27 @@ function PlaylistTable({
   onToggleAll: () => void;
 }) {
   const { t } = useI18n();
+  const [dragOrder, setDragOrder] = useState<string[] | null>(null);
+  const presentation = new Map(sourceRows.map((row) => {
+    const result = resolved.get(row.entry.id);
+    const signature = result?.request ? mediaSignatureForRequest(result.request) : null;
+    const job = signature ? jobs.find((item) => mediaSignatureForRequest(item.request) === signature)
+      ?? (row.jobId ? jobs.find((item) => item.id === row.jobId && !item.mediaSignature) : null) : null;
+    const tags = musicKind && row.media ? { ...musicMetadata(row.media), ...musicEdits?.[row.entry.id] } : null;
+    return [row.entry.id, { result, tags, title: tags?.title ?? row.entry.title,
+      duration: row.media?.duration ?? row.entry.duration,
+      status: visibleRowStatus(row, result, job, downloadedHistoryKeys),
+      detail: rowDetail(row, result, job, t) }] as const;
+  }));
+  const sortedRows = sortPlaylistRows(sourceRows, sort, (row) => {
+    const data = presentation.get(row.entry.id)!;
+    return { ...data, size: data.result?.estimatedBytes };
+  }, locale);
+  const sourceById = new Map(sourceRows.map((row) => [row.entry.id, row]));
+  const rows = dragOrder ? dragOrder.map((id) => sourceById.get(id)).filter((row): row is PlaylistRow => Boolean(row)) : sortedRows;
   const selectable = rows.filter((row) => row.analysisState !== "unavailable");
   const allSelected = selectable.length > 0 && selectable.every((row) => row.selected);
+  const partiallySelected = !allSelected && selectable.some((row) => row.selected);
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
   const dragActionRef = useRef<"check" | "uncheck">("check");
@@ -922,7 +1269,7 @@ function PlaylistTable({
   const scrollSpeedRef = useRef(0);
   const cursorPositionRef = useRef({ x: 0, y: 0 });
   const dragCleanupRef = useRef<(() => void) | null>(null);
-  const minimumWidths: PlaylistColumnWidths = { title: 150, duration: 60, size: 70, status: 90 };
+  const minimumWidths: PlaylistColumnWidths = { title: 150, duration: locale === "en" ? 96 : 60, size: 70, status: 90 };
   const gridColumns = `42px ${columnWidths.title}px ${columnWidths.duration}px ${columnWidths.size}px ${columnWidths.status}px`;
   const tableWidth = 42 + Object.values(columnWidths).reduce((total, width) => total + width, 0);
 
@@ -1009,9 +1356,10 @@ function PlaylistTable({
 
   function startDrag(index: number, event: React.MouseEvent) {
     if (event.button !== 0 || rows[index].analysisState === "unavailable") return;
-    if ((event.target as HTMLElement).closest("[data-resize]")) return;
+    if ((event.target as HTMLElement).closest("button, [data-resize]")) return;
     event.preventDefault();
     isDraggingRef.current = true;
+    setDragOrder(rows.map((row) => row.entry.id));
     dragActionRef.current = rows[index].selected ? "uncheck" : "check";
     pivotIndexRef.current = index;
     traversedAwayRef.current = false;
@@ -1040,6 +1388,7 @@ function PlaylistTable({
     };
     const up = () => {
       isDraggingRef.current = false;
+      setDragOrder(null);
       stopAutoScroll();
       document.body.classList.remove("playlist-drag-selecting");
       document.removeEventListener("mousemove", move);
@@ -1052,26 +1401,31 @@ function PlaylistTable({
   }
 
   return (
-    <div ref={containerRef} className={`playlist-table-wrap${compact ? " compact" : ""}${resizable ? " resizable" : ""}`}>
+    <div ref={containerRef} className={`playlist-table-wrap${compact ? " compact" : ""}${resizable ? " resizable" : ""}${musicKind ? " music-track-table" : ""}`}>
       <div className="playlist-table" style={resizable ? { width: tableWidth, minWidth: tableWidth } : undefined}>
         <div className="playlist-table-head" style={resizable ? { gridTemplateColumns: gridColumns } : undefined}>
-          <button type="button" className="playlist-checkbox-button" onClick={onToggleAll} aria-label={allSelected ? t("playlist.selectNone") : t("playlist.selectAll")}><Checkbox checked={allSelected} /></button>
-          <span className="playlist-title-column">{t("playlist.columnTitle")}{resizable ? <span className="column-resizer" data-resize="true" onMouseDown={(event) => startResize("title", event)} /> : null}</span>
-          <span>{t("playlist.columnDuration")}{resizable ? <span className="column-resizer" data-resize="true" onMouseDown={(event) => startResize("duration", event)} /> : null}</span>
-          <span>{t("playlist.columnSize")}{resizable ? <span className="column-resizer" data-resize="true" onMouseDown={(event) => startResize("size", event)} /> : null}</span>
-          <span>{t("playlist.columnStatus")}{resizable ? <span className="column-resizer" data-resize="true" onMouseDown={(event) => startResize("status", event)} /> : null}</span>
+          <button type="button" className="playlist-checkbox-button" role={musicKind ? "checkbox" : undefined} aria-checked={musicKind ? allSelected ? true : partiallySelected ? "mixed" : false : undefined} disabled={musicKind ? selectable.length === 0 : undefined} onClick={onToggleAll} aria-label={musicKind ? t("music.selectAllTracks") : allSelected ? t("playlist.selectNone") : t("playlist.selectAll")}><Checkbox checked={allSelected} mixed={partiallySelected} /></button>
+          {(["title", "duration", "size", "status"] as const).map((column) => {
+            const label = t(column === "title" ? musicKind ? "music.columnTrack" : "playlist.columnTitle" : column === "duration" ? "playlist.columnDuration" : column === "size" ? "playlist.columnSize" : "playlist.columnStatus");
+            const direction = sort?.column === column ? sort.direction : undefined;
+            const next: PlaylistSort = !direction ? { column, direction: "ascending" } : direction === "ascending" ? { column, direction: "descending" } : null;
+            const hint = t(!next ? "playlist.sortOriginal" : column === "title" ? next.direction === "ascending" ? "playlist.sortTitleAscending" : "playlist.sortTitleDescending" : column === "status" ? next.direction === "ascending" ? "playlist.sortStatusAscending" : "playlist.sortStatusDescending" : next.direction === "ascending" ? "playlist.sortAscending" : "playlist.sortDescending");
+            return <span key={column} className={column === "title" ? "playlist-title-column" : undefined}>
+              <button type="button" className="playlist-sort-button" aria-label={`${label}: ${hint}`} title={hint} aria-pressed={Boolean(direction)} onClick={() => onSort(next)}>
+                <span>{label}</span><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  {direction === "ascending" ? <path d="m4 10 4-4 4 4" /> : direction === "descending" ? <path d="m4 6 4 4 4-4" /> : <path d="m5 6 3-3 3 3M5 10l3 3 3-3" />}
+                </svg>
+              </button>
+              {resizable ? <span className="column-resizer" data-resize="true" onMouseDown={(event) => startResize(column, event)} /> : null}
+            </span>;
+          })}
         </div>
         <div className="playlist-table-body">
+          {!rows.length && emptyLabel ? <div className="playlist-search-empty" role="status">{emptyLabel}</div> : null}
           {rows.map((row, index) => {
-            const result = resolved.get(row.entry.id);
-            const currentSignature = result?.request ? mediaSignatureForRequest(result.request) : null;
-            const job = currentSignature
-              ? jobs.find((item) => mediaSignatureForRequest(item.request) === currentSignature)
-                ?? (row.jobId ? jobs.find((item) => item.id === row.jobId && !item.mediaSignature) : null)
-              : null;
-            const status = visibleRowStatus(row, result, job, currentSignature, finishedMediaSignatures);
+            const { result, status, detail, tags, title, duration } = presentation.get(row.entry.id)!;
             const disabled = row.analysisState === "unavailable";
-            const detail = rowDetail(row, result, job, t);
+            const statusAction = Boolean(onAnalyzeItem) && row.analysisState !== "ready" && row.analysisState !== "unavailable" && row.analysisState !== "analyzing";
             return (
               <div
                 key={row.entry.id}
@@ -1080,7 +1434,7 @@ function PlaylistTable({
                 tabIndex={disabled ? -1 : 0}
                 aria-checked={row.selected}
                 aria-disabled={disabled || undefined}
-                aria-label={row.selected ? t("playlist.unselectItem", { title: row.entry.title }) : t("playlist.selectItem", { title: row.entry.title })}
+                aria-label={row.selected ? t("playlist.unselectItem", { title }) : t("playlist.selectItem", { title })}
                 data-drag-row={index}
                 data-selected={row.selected || undefined}
                 data-disabled={disabled || undefined}
@@ -1090,7 +1444,7 @@ function PlaylistTable({
                   if (isDraggingRef.current) applyDragRange(index);
                 }}
                 onKeyDown={(event) => {
-                  if (!disabled && (event.key === "Enter" || event.key === " ")) {
+                  if (event.target === event.currentTarget && !disabled && (event.key === "Enter" || event.key === " ")) {
                     event.preventDefault();
                     onToggle(row.entry.id);
                   }
@@ -1098,18 +1452,27 @@ function PlaylistTable({
               >
                 <span className="playlist-checkbox-cell"><Checkbox checked={row.selected} disabled={disabled} /></span>
                 <div className="playlist-row-title">
+                  {musicKind === "album" ? <span className="music-track-number">{String(row.entry.index).padStart(2, "0")}</span> : null}
                   {showThumbnails ? <MediaThumbnail
-                    src={row.entry.thumbnail ?? row.media?.thumbnail}
+                    zoomable={Boolean(musicKind)}
+                    src={musicKind ? row.media?.thumbnail ?? row.entry.thumbnail : row.entry.thumbnail ?? row.media?.thumbnail}
                     mediaUrl={row.media?.webpageUrl ?? row.entry.url}
-                    alt={row.entry.title}
+                    alt={title}
                     className="playlist-row-thumbnail"
                     placeholderClassName="playlist-row-thumb-placeholder"
                   /> : null}
-                  <span><strong title={row.entry.title}>{row.entry.title}</strong><small>{row.entry.index}</small></span>
+                  <span className={musicKind ? "music-track-copy" : undefined}><strong title={title}>{title}</strong><small>{musicKind ? tags?.artist ?? "" : row.entry.index}</small></span>
+                  {tags && row.analysisState === "ready" && onEditMusic ? <button type="button" className="icon-button secondary music-track-edit" aria-label={`${t("music.editTags")}: ${title}`} title={t("music.editTags")} onClick={() => onEditMusic(row.entry.id)}>✎</button> : null}
                 </div>
-                <span className="playlist-cell-muted">{row.entry.duration ? formatDuration(row.entry.duration) : "-"}</span>
+                <span className="playlist-cell-muted">{duration != null ? formatDuration(duration) : "-"}</span>
                 <span className="playlist-cell-muted">{formatEstimatedSize(result?.estimatedBytes, locale)}</span>
-                <div className="playlist-status-cell" title={detail?.tooltip}><StatusBadge status={status} tooltip={detail?.tooltip} />{detail ? <small title={detail.tooltip}>{detail.text}</small> : null}</div>
+                <div className="playlist-status-cell" title={detail?.tooltip}>
+                  {statusAction && onAnalyzeItem ? <div className="playlist-status-action-anchor">
+                    <StatusBadge status={status} tooltip={detail?.tooltip} />
+                    <ItemAnalysisButton row={row} title={title} description={detail?.tooltip} onAnalyze={onAnalyzeItem} />
+                  </div> : <StatusBadge status={status} tooltip={detail?.tooltip} />}
+                  {detail ? <small className={statusAction ? "playlist-analysis-detail-placeholder" : undefined} title={detail.tooltip}>{detail.text}</small> : null}
+                </div>
               </div>
             );
           })}
@@ -1119,79 +1482,48 @@ function PlaylistTable({
   );
 }
 
+function ItemAnalysisButton({ row, title, description, onAnalyze }: { row: PlaylistRow; title: string; description?: string; onAnalyze: (id: string) => void }) {
+  const { t } = useI18n();
+  const label = t("music.analyzeItem");
+  return <button type="button" className="icon-button secondary playlist-item-analyze playlist-status-analyze" aria-label={`${label}: ${title}`} title={description ? `${label}: ${description}` : label} onClick={() => onAnalyze(row.entry.id)}>
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M20 4v5h-5M4 20v-5h5M5.6 8a7 7 0 0 1 11.6-2L20 9M4 15l2.8 3A7 7 0 0 0 18.4 16" /></svg>
+  </button>;
+}
+
 function PlaylistParametersPanel({
+  musicMode = false,
+  metadataEditor,
+  summary,
   params,
   setParams,
   media,
   options,
-  selectedCount,
   dense,
-  sizeSummary,
-  readyForBatch,
-  selectedAnalysisPending,
-  enqueueing,
-  enqueueResult,
   onModeChange,
-  onDestination,
-  onEnqueue,
-  onOpenQueue,
-  onDismissResult,
 }: {
+  musicMode?: boolean;
+  metadataEditor?: React.ReactNode;
+  summary?: React.ReactNode;
   params: PlaylistParameters;
   setParams: React.Dispatch<React.SetStateAction<PlaylistParameters>>;
   media: MediaInfo[];
   options: ReturnType<typeof aggregatePlaylistFormats>;
-  selectedCount: number;
   dense: boolean;
-  sizeSummary: ReturnType<typeof summarizePlaylistSize>;
-  readyForBatch: boolean;
-  selectedAnalysisPending: boolean;
-  enqueueing: boolean;
-  enqueueResult: { added: number; skipped: number; id: number } | null;
   onModeChange: (mode: PlaylistDownloadMode) => void;
-  onDestination: () => void;
-  onEnqueue: () => void;
-  onOpenQueue: () => void;
-  onDismissResult: () => void;
 }) {
-  const { locale, t } = useI18n();
+  const { t } = useI18n();
   const [videoAdvancedOpen, setVideoAdvancedOpen] = useState(false);
   const profileOptions = createVideoProfileOptions(t);
   const languages = countSubtitleOptions(media, (subtitle) => subtitle.language);
   const subtitleFormats = countSubtitleOptions(media, (subtitle) => subtitle.formats).flatMap((item) => item.value.map((value) => ({ value, count: item.count })));
   const distinctSubtitleFormats = mergeCounts(subtitleFormats);
-  const formattedSize = formatSizeSummary(sizeSummary, locale, t);
-  const profileHeight = qualityProfileHeight(params.videoProfile);
-  const displayedContainer = profileHeight == null ? params.container?.toUpperCase() ?? t("common.auto") : "MP4";
-  const displayedResolution = profileHeight == null
-    ? params.resolution === "best" ? t("video.best") : `${params.resolution}p`
-    : `${profileHeight}p`;
-  const summaryFacts = params.mode === "video"
-    ? [
-        [t("video.container"), displayedContainer],
-        [t("video.resolution"), displayedResolution],
-        [t("video.fps"), params.fps == null ? t("common.auto") : `${params.fps} fps`],
-        [t("playlist.estimatedSize"), formattedSize],
-      ]
-    : params.mode === "audio"
-      ? [
-          [t("audio.codec"), params.audioPreset.replace("audio", "").toUpperCase()],
-          [t("audio.bitrate"), params.audioBitrate.replace("K", " kbps")],
-          [t("audio.channels"), params.audioChannels === "source" ? t("audio.sourceChannels") : params.audioChannels === "mono" ? "Mono" : "Stereo"],
-          [t("playlist.estimatedSize"), formattedSize],
-        ]
-      : [
-          [t("subtitles.format"), params.subtitleFormat.toUpperCase()],
-          [t("subtitles.language"), params.subtitleLanguage ?? t("common.auto")],
-          [t("subtitles.type"), params.allowAutomaticSubtitles ? t("playlist.subtitlesManualAndAutomatic") : t("playlist.subtitlesManualOnly")],
-          [t("playlist.estimatedSize"), formattedSize],
-        ];
 
   return (
-    <div className={`playlist-parameters${dense ? " dense" : ""}`}>
+    <div className={`playlist-parameters${dense ? " dense" : ""}${musicMode ? " music-download-controls" : ""}`}>
+      {musicMode ? <MusicModeTabs mode={params.mode} onChange={onModeChange} /> : null}
+      <MusicParametersGroup enabled={musicMode}>
       <div className="playlist-parameter-controls">
-        <DownloadModeTabs mode={params.mode} onChange={onModeChange} />
-        <h3 className="download-parameters-heading">{t("playlist.parameters")}</h3>
+        {!musicMode ? <DownloadModeTabs mode={params.mode} onChange={onModeChange} /> : null}
 
         {params.mode === "video" ? (
         <div className="options-stack playlist-options-stack">
@@ -1233,6 +1565,8 @@ function PlaylistParametersPanel({
             ) : null}
           </section>
         </div>
+        ) : params.mode === "audio" && musicMode ? (
+          <MusicAudioOptions preset={params.audioPreset} bitrate={params.audioBitrate} quality={params.musicQuality ?? "best"} embedMetadata={params.embedMetadata} embedThumbnail={params.embedThumbnail} formats={media.flatMap((item) => item.audioFormats)} encoders={params.audioEncoders ?? null} onPreset={(audioPreset) => setParams((current) => ({ ...current, audioPreset }))} onBitrate={(audioBitrate) => setParams((current) => ({ ...current, audioBitrate }))} onQuality={(musicQuality) => setParams((current) => ({ ...current, musicQuality }))} onMetadata={(embedMetadata) => setParams((current) => ({ ...current, embedMetadata }))} onThumbnail={(embedThumbnail) => setParams((current) => ({ ...current, embedThumbnail }))} />
         ) : params.mode === "audio" ? (
         <section className="advanced-settings audio-advanced-settings playlist-audio-settings" aria-label={t("audio.settings")}>
           <div className="settings-title audio-title"><AudioWaveIcon /><h3>{t("audio.settings")}</h3></div>
@@ -1267,27 +1601,66 @@ function PlaylistParametersPanel({
         )}
       </div>
 
-      <section className="playlist-summary-card" aria-label={t("common.finalFile")}>
-        <header><h3>{t("common.finalFile")}</h3></header>
-        <dl className="playlist-summary-facts">
-          {summaryFacts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
-        </dl>
-        {sizeSummary.calculatingCount > 0 ? <small className="playlist-size-progress">{t("playlist.sizeCalculating", { count: sizeSummary.calculatingCount })}</small> : null}
-        <div className="playlist-destination">
-          <label htmlFor="playlist-destination">{t("downloader.destination")}</label>
-          <div><input id="playlist-destination" value={params.destinationDir} onChange={(event) => setParams((current) => ({ ...current, destinationDir: event.target.value }))} /><button type="button" className="secondary" onClick={onDestination}>{t("downloader.browse")}</button></div>
-        </div>
-        <DownloadActionButton
-          ariaLabel={enqueueing ? t("playlist.enqueueing") : t("playlist.enqueueSelected", { count: selectedCount })}
-          busy={enqueueing}
-          analyzed
-          className="playlist-enqueue-button"
-          disabled={!readyForBatch || enqueueing || !params.destinationDir.trim()}
-          label={enqueueing ? t("playlist.enqueueing") : t("playlist.enqueueSelected", { count: selectedCount })}
-          onClick={onEnqueue}
-          type="button"
-        />
-        {selectedAnalysisPending ? <small className="playlist-readiness-note">{t("playlist.waitSelectedAnalysis")}</small> : null}
+      {metadataEditor}
+      </MusicParametersGroup>
+      {summary}
+    </div>
+  );
+}
+
+type PlaylistSummaryProps = {
+  musicMode?: boolean;
+  compact?: boolean;
+  params: PlaylistParameters;
+  setParams: React.Dispatch<React.SetStateAction<PlaylistParameters>>;
+  selectedCount: number;
+  sizeSummary: ReturnType<typeof summarizePlaylistSize>;
+  readyForBatch: boolean;
+  selectedAnalysisPending: boolean;
+  enqueueing: boolean;
+  enqueueResult: { added: number; skipped: number; id: number } | null;
+  onDestination: () => void;
+  onEnqueue: () => void;
+  onOpenQueue: () => void;
+  onDismissResult: () => void;
+};
+
+function PlaylistDownloadSummary({ musicMode = false, compact = false, params, setParams, selectedCount, sizeSummary, readyForBatch, selectedAnalysisPending, enqueueing, enqueueResult, onDestination, onEnqueue, onOpenQueue, onDismissResult }: PlaylistSummaryProps) {
+  const { locale, t } = useI18n();
+  const formattedSize = formatSizeSummary(sizeSummary, locale, t);
+  const profileHeight = qualityProfileHeight(params.videoProfile);
+  const displayedContainer = profileHeight == null ? params.container?.toUpperCase() ?? t("common.auto") : "MP4";
+  const displayedResolution = profileHeight == null
+    ? params.resolution === "best" ? t("video.best") : `${params.resolution}p`
+    : `${profileHeight}p`;
+  const summaryFacts = params.mode === "video"
+    ? [
+        [t("video.container"), displayedContainer],
+        [t("video.resolution"), displayedResolution],
+        [t("video.fps"), params.fps == null ? t("common.auto") : `${params.fps} fps`],
+        [t("playlist.estimatedSize"), formattedSize],
+      ]
+    : params.mode === "audio"
+      ? musicMode ? [
+          [t("audio.codec"), params.audioPreset === "audioSource" ? t("music.original") : params.audioPreset.replace("audio", "").toUpperCase()],
+          [t("music.sourceQuality"), params.musicQuality === "best" || !params.musicQuality ? t("music.best") : t("music.upTo", { bitrate: params.musicQuality })],
+          ...(params.audioPreset === "audioMp3" ? [[t("audio.bitrate"), params.audioBitrate.replace("K", " kbps")]] : []),
+          [t("playlist.estimatedSize"), formattedSize],
+        ] : [
+          [t("audio.codec"), params.audioPreset.replace("audio", "").toUpperCase()],
+          [t("audio.bitrate"), params.audioBitrate.replace("K", " kbps")],
+          [t("audio.channels"), params.audioChannels === "source" ? t("audio.sourceChannels") : params.audioChannels === "mono" ? "Mono" : "Stereo"],
+          [t("playlist.estimatedSize"), formattedSize],
+        ]
+      : [
+          [t("subtitles.format"), params.subtitleFormat.toUpperCase()],
+          [t("subtitles.language"), params.subtitleLanguage ?? t("common.auto")],
+          [t("subtitles.type"), params.allowAutomaticSubtitles ? t("playlist.subtitlesManualAndAutomatic") : t("playlist.subtitlesManualOnly")],
+          [t("playlist.estimatedSize"), formattedSize],
+        ];
+
+  const feedback = <>
+        {selectedAnalysisPending ? <small className="playlist-readiness-note">{t("playlist.readyWhileAnalyzing")}</small> : null}
         {enqueueResult ? (
           <div className={`playlist-batch-feedback${enqueueResult.skipped > 0 ? " has-skips" : " all-added"}`} role={enqueueResult.skipped > 0 ? "alert" : "status"}>
             {enqueueResult.added > 0 ? <NoticeCountdown key={enqueueResult.id} /> : null}
@@ -1306,8 +1679,52 @@ function PlaylistParametersPanel({
             </button>
           </div>
         ) : null}
+  </>;
+  if (musicMode || compact) return <MusicDownloadSummary
+    count={selectedCount}
+    countLabel={compact ? t(params.mode === "video" ? "playlist.itemCount" : params.mode === "audio" ? "music.trackCount" : "playlist.fileCount", { count: selectedCount }) : undefined}
+    countIcon={compact && params.mode !== "audio" ? <PlaylistDownloadIcon /> : undefined}
+    video={params.mode === "video"}
+    sourceQuality={musicMode}
+    size={formattedSize}
+    facts={summaryFacts.filter(([label]) => label !== t("playlist.estimatedSize")).map(([label, value]) => ({ label, value }))}
+    destinationDir={params.destinationDir}
+    onDestinationChange={(destinationDir) => setParams((current) => ({ ...current, destinationDir }))}
+    onBrowse={onDestination}
+    action={{
+      className: compact ? "playlist-enqueue-button" : undefined,
+      ariaLabel: t(selectedAnalysisPending ? "playlist.enqueueReady" : "playlist.enqueueSelected", { count: selectedCount }),
+      label: t(selectedAnalysisPending ? "playlist.enqueueReady" : "playlist.enqueueSelected", { count: selectedCount }),
+      busy: enqueueing, analyzed: true, disabled: !readyForBatch || enqueueing || !params.destinationDir.trim(),
+      onClick: onEnqueue, type: "button",
+    }}
+  >
+    {sizeSummary.calculatingCount > 0 ? <small className="playlist-size-progress">{t("playlist.sizeCalculating", { count: sizeSummary.calculatingCount })}</small> : null}
+    {feedback}
+  </MusicDownloadSummary>;
+  return (
+      <section className="playlist-summary-card" aria-label={t("common.finalFile")}>
+        <header><h3>{t("common.finalFile")}</h3></header>
+        <dl className="playlist-summary-facts">
+          {summaryFacts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+        </dl>
+        {sizeSummary.calculatingCount > 0 ? <small className="playlist-size-progress">{t("playlist.sizeCalculating", { count: sizeSummary.calculatingCount })}</small> : null}
+        <div className="playlist-destination">
+          <label htmlFor="playlist-destination">{t("downloader.destination")}</label>
+          <div><input id="playlist-destination" value={params.destinationDir} onChange={(event) => setParams((current) => ({ ...current, destinationDir: event.target.value }))} /><button type="button" className="secondary" onClick={onDestination}>{t("downloader.browse")}</button></div>
+        </div>
+        <DownloadActionButton
+          ariaLabel={t(selectedAnalysisPending ? "playlist.enqueueReady" : "playlist.enqueueSelected", { count: selectedCount })}
+          busy={enqueueing}
+          analyzed
+          className="playlist-enqueue-button"
+          disabled={!readyForBatch || enqueueing || !params.destinationDir.trim()}
+          label={t(selectedAnalysisPending ? "playlist.enqueueReady" : "playlist.enqueueSelected", { count: selectedCount })}
+          onClick={onEnqueue}
+          type="button"
+        />
+        {feedback}
       </section>
-    </div>
   );
 }
 
@@ -1331,6 +1748,7 @@ function ChevronIcon({ expanded }: { expanded: boolean }) {
 
 function StatusBadge({ status, tooltip }: { status: RowVisibleStatus; tooltip?: string }) {
   const { t } = useI18n();
+  if (status === "analyzing") return <span className="playlist-status status-analyzing" role="status" aria-label={t("playlist.status.analyzing")} aria-busy="true" title={t("playlist.status.analyzing")}><span className="analysis-spinner" aria-hidden="true" /></span>;
   const icon = statusIcon(status);
   return (
     <span className={`playlist-status status-${status}`}>
@@ -1352,14 +1770,13 @@ function StatusBadge({ status, tooltip }: { status: RowVisibleStatus; tooltip?: 
   );
 }
 
-type RowVisibleStatus = "pendingAnalysis" | "analyzing" | "available" | "availableWithFallback" | "requiresAuth" | "unavailable" | "temporaryError" | "analysisError" | "queued" | "downloading" | "paused" | "downloadFailed" | "cancelled" | "downloaded";
+type RowVisibleStatus = PlaylistRowStatus;
 
 function visibleRowStatus(
   row: PlaylistRow,
   resolved: ResolvedPlaylistItem | null | undefined,
   job: Job | null | undefined,
-  currentSignature: string | null,
-  finishedMediaSignatures: Set<string>,
+  downloadedHistoryKeys: Set<string>,
 ): RowVisibleStatus {
   if (job) {
     if (job.state === "Pending") return "queued";
@@ -1369,7 +1786,7 @@ function visibleRowStatus(
     if (job.state === "Cancelled") return "cancelled";
     if (job.state === "Completed") return "downloaded";
   }
-  if (currentSignature && finishedMediaSignatures.has(currentSignature)) return "downloaded";
+  if (resolved?.request && historyContainsRequest(downloadedHistoryKeys, resolved.request)) return "downloaded";
   if (row.analysisState === "pending") return "pendingAnalysis";
   if (row.analysisState === "analyzing") return "analyzing";
   if (row.analysisState === "requiresAuth") return "requiresAuth";
@@ -1506,8 +1923,8 @@ function isAnalysisTimeout(error: unknown) {
   return String(error).toLowerCase().includes("analysis-error:timeout");
 }
 
-function Checkbox({ checked, disabled = false }: { checked: boolean; disabled?: boolean }) {
-  return <span className="playlist-checkbox" data-checked={checked || undefined} data-disabled={disabled || undefined} aria-hidden="true" />;
+function Checkbox({ checked, disabled = false, mixed = false }: { checked: boolean; disabled?: boolean; mixed?: boolean }) {
+  return <span className="playlist-checkbox" data-checked={checked || undefined} data-mixed={mixed || undefined} data-disabled={disabled || undefined} aria-hidden="true" />;
 }
 
 function StackedLayoutIcon() {

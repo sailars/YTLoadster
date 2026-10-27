@@ -48,6 +48,13 @@ pub enum JobPhase {
     PostProcessing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionRetry {
+    pub attempt: u8,
+    pub limit: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Job {
@@ -56,6 +63,8 @@ pub struct Job {
     pub media_signature: Option<String>,
     pub state: JobState,
     pub phase: Option<JobPhase>,
+    #[serde(default)]
+    pub connection_retry: Option<ConnectionRetry>,
     pub progress_percent: Option<u8>,
     pub speed: Option<String>,
     pub eta: Option<String>,
@@ -240,6 +249,7 @@ impl DownloadManager {
             }
             job.state = JobState::Paused;
             job.phase = None;
+            job.connection_retry = None;
             job.speed = None;
             job.eta = None;
             job.error = None;
@@ -265,6 +275,7 @@ impl DownloadManager {
                 if matches!(job.state, JobState::Pending | JobState::Running) {
                     job.state = JobState::Paused;
                     job.phase = None;
+                    job.connection_retry = None;
                     job.speed = None;
                     job.eta = None;
                     job.error = None;
@@ -300,6 +311,7 @@ impl DownloadManager {
         self.update_job(id, |job| {
             job.state = JobState::Cancelled;
             job.phase = None;
+            job.connection_retry = None;
             job.progress_percent = None;
             job.speed = None;
             job.eta = None;
@@ -345,6 +357,7 @@ impl DownloadManager {
             ) {
                 job.state = JobState::Cancelled;
                 job.phase = None;
+                job.connection_retry = None;
                 job.progress_percent = None;
                 job.speed = None;
                 job.eta = None;
@@ -377,6 +390,7 @@ impl DownloadManager {
                 ) {
                     job.state = JobState::Cancelled;
                     job.phase = None;
+                    job.connection_retry = None;
                     job.progress_percent = None;
                     job.speed = None;
                     job.eta = None;
@@ -419,6 +433,7 @@ impl DownloadManager {
             request,
             state: JobState::Pending,
             phase: None,
+            connection_retry: None,
             progress_percent: None,
             speed: None,
             eta: None,
@@ -435,6 +450,7 @@ impl DownloadManager {
             if job.state == JobState::Paused {
                 job.state = JobState::Pending;
                 job.phase = None;
+                job.connection_retry = None;
                 job.speed = None;
                 job.eta = None;
                 job.error = None;
@@ -449,6 +465,7 @@ impl DownloadManager {
             if job.state == JobState::Paused {
                 job.state = JobState::Pending;
                 job.phase = None;
+                job.connection_retry = None;
                 job.speed = None;
                 job.eta = None;
                 job.error = None;
@@ -532,6 +549,7 @@ impl DownloadManager {
         self.update_job(id, |job| {
             job.state = JobState::Running;
             job.phase = Some(initial_download_phase(&job.request));
+            job.connection_retry = None;
             job.error = None;
         })
     }
@@ -543,6 +561,7 @@ impl DownloadManager {
             }
             job.state = JobState::Completed;
             job.phase = None;
+            job.connection_retry = None;
             job.progress_percent = Some(100);
             job.speed = None;
             job.eta = None;
@@ -557,6 +576,7 @@ impl DownloadManager {
             }
             job.state = JobState::Failed;
             job.phase = None;
+            job.connection_retry = None;
             job.progress_percent = None;
             job.speed = None;
             job.eta = None;
@@ -574,10 +594,37 @@ impl DownloadManager {
             }
             job.state = JobState::Running;
             job.phase = progress.phase.or(job.phase).or(Some(JobPhase::Downloading));
+            if progress.speed.is_some() || progress.percent > job.progress_percent.unwrap_or(0) {
+                job.connection_retry = None;
+            }
             job.progress_percent = Some(progress.percent);
-            job.speed = progress.speed;
-            job.eta = progress.eta;
+            job.speed = if job.connection_retry.is_none() {
+                progress.speed
+            } else {
+                None
+            };
+            job.eta = if job.connection_retry.is_none() {
+                progress.eta
+            } else {
+                None
+            };
             job.error = None;
+        })
+    }
+
+    pub fn mark_connection_retry(&self, id: u64, retry: ConnectionRetry) -> Result<Job, String> {
+        self.update_job(id, |job| {
+            if job.state != JobState::Running
+                || matches!(
+                    job.phase,
+                    Some(JobPhase::Merging | JobPhase::PostProcessing)
+                )
+            {
+                return;
+            }
+            job.connection_retry = Some(retry);
+            job.speed = None;
+            job.eta = None;
         })
     }
 
@@ -591,6 +638,7 @@ impl DownloadManager {
             }
             job.state = JobState::Running;
             job.phase = Some(JobPhase::PostProcessing);
+            job.connection_retry = None;
             job.progress_percent = Some(100);
             job.speed = None;
             job.eta = None;
@@ -608,6 +656,7 @@ impl DownloadManager {
             }
             job.state = JobState::Running;
             job.phase = Some(JobPhase::Merging);
+            job.connection_retry = None;
             job.progress_percent = Some(100);
             job.speed = None;
             job.eta = None;
@@ -700,6 +749,8 @@ struct VideoJobSignature {
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 struct AudioJobSignature {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    music_metadata: Option<crate::ytdlp::MusicMetadata>,
     canonical_source: String,
     audio_format_id: Option<String>,
     output_format: &'static str,
@@ -752,6 +803,8 @@ fn audio_job_signature(request: &DownloadRequest) -> Option<AudioJobSignature> {
         DownloadPreset::AudioMp3 => "mp3",
         DownloadPreset::AudioM4a => "m4a",
         DownloadPreset::AudioOpus => "opus",
+        DownloadPreset::AudioSource => "source",
+        DownloadPreset::AudioFlac => "flac",
         _ => return None,
     };
 
@@ -762,6 +815,11 @@ fn audio_job_signature(request: &DownloadRequest) -> Option<AudioJobSignature> {
     };
 
     Some(AudioJobSignature {
+        music_metadata: request
+            .music
+            .as_ref()
+            .filter(|_| request.embed_metadata.unwrap_or(false))
+            .map(|music| music.metadata.clone()),
         canonical_source: canonical_source(request),
         audio_format_id: normalized_text(request.format_id.as_deref()),
         output_format,
@@ -847,6 +905,7 @@ fn push_job(state: &mut DownloadState, request: DownloadRequest) -> Job {
         request,
         state: JobState::Pending,
         phase: None,
+        connection_retry: None,
         progress_percent: None,
         speed: None,
         eta: None,
@@ -1132,11 +1191,8 @@ async fn run_download(
     add_fragment_concurrency_args(&mut args, manager.fragment_concurrency());
     add_temp_path_args(&mut args, &temp_dir);
     let custom_user_agent = app.state::<YtdlpRuntimeSettings>().custom_user_agent();
-    add_download_runtime_args(
-        &mut args,
-        manager.retry_settings(),
-        custom_user_agent.as_deref(),
-    );
+    let retry_settings = manager.retry_settings();
+    add_download_runtime_args(&mut args, retry_settings, custom_user_agent.as_deref());
     let proxy_url = app.state::<YtdlpRuntimeSettings>().proxy_url();
     crate::proxy::add_config_args(&mut args, proxy_url.as_deref());
     let mut process = Command::new(ytdlp_path);
@@ -1206,6 +1262,11 @@ async fn run_download(
                         &progress_app,
                         progress_manager.mark_progress(job_id, progress),
                     );
+                } else if let Some(retry) = parse_connection_retry(&line, retry_settings) {
+                    emit_job(
+                        &progress_app,
+                        progress_manager.mark_connection_retry(job_id, retry),
+                    );
                 } else if is_video_merging_line(&line) {
                     emit_job(&progress_app, progress_manager.mark_merging(job_id));
                 } else if is_post_processing_line(&line) {
@@ -1216,11 +1277,19 @@ async fn run_download(
         output_path
     });
 
+    let retry_manager = manager.clone();
+    let retry_app = app.clone();
     let stderr_task = tauri::async_runtime::spawn(async move {
         let mut collected = String::new();
         if let Some(stderr) = stderr {
             let mut reader = BufReader::new(stderr);
             while let Ok(Some(line)) = read_process_line(&mut reader).await {
+                if let Some(retry) = parse_connection_retry(&line, retry_settings) {
+                    emit_job(
+                        &retry_app,
+                        retry_manager.mark_connection_retry(job_id, retry),
+                    );
+                }
                 if !collected.is_empty() {
                     collected.push('\n');
                 }
@@ -1466,6 +1535,8 @@ fn expected_output_extension(request: &DownloadRequest) -> Option<String> {
         DownloadPreset::AudioMp3 => Some("mp3".to_string()),
         DownloadPreset::AudioM4a => Some("m4a".to_string()),
         DownloadPreset::AudioOpus => Some("opus".to_string()),
+        DownloadPreset::AudioFlac => Some("flac".to_string()),
+        DownloadPreset::AudioSource => None,
         DownloadPreset::Subtitles => request
             .subtitle
             .as_ref()
@@ -1488,9 +1559,11 @@ fn output_extension_matches(path: &Path, expected_extension: Option<&str>) -> bo
 fn initial_download_phase(request: &DownloadRequest) -> JobPhase {
     match request.preset {
         DownloadPreset::BestVideo | DownloadPreset::Mp4Video => JobPhase::DownloadingVideo,
-        DownloadPreset::AudioMp3 | DownloadPreset::AudioM4a | DownloadPreset::AudioOpus => {
-            JobPhase::DownloadingAudio
-        }
+        DownloadPreset::AudioMp3
+        | DownloadPreset::AudioM4a
+        | DownloadPreset::AudioOpus
+        | DownloadPreset::AudioSource
+        | DownloadPreset::AudioFlac => JobPhase::DownloadingAudio,
         DownloadPreset::Subtitles => JobPhase::Downloading,
     }
 }
@@ -1549,11 +1622,17 @@ fn finalize_output(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| match request.preset {
             DownloadPreset::BestVideo | DownloadPreset::Mp4Video => "video",
-            DownloadPreset::AudioMp3 | DownloadPreset::AudioM4a | DownloadPreset::AudioOpus => {
-                "audio"
-            }
+            DownloadPreset::AudioMp3
+            | DownloadPreset::AudioM4a
+            | DownloadPreset::AudioOpus
+            | DownloadPreset::AudioSource
+            | DownloadPreset::AudioFlac => "audio",
             DownloadPreset::Subtitles => "subtitles",
         });
+    let music_destination = crate::music::destination_dir(destination_dir, request.music.as_ref());
+    let destination_dir = music_destination.as_path();
+    let music_stem = request.music.as_ref().map(crate::music::file_stem);
+    let source_stem = music_stem.as_deref().unwrap_or(source_stem);
     let source_stem = if request
         .subtitle
         .as_ref()
@@ -1588,9 +1667,11 @@ fn finalize_output(
         if filename.is_empty() {
             filename.push_str(match request.preset {
                 DownloadPreset::BestVideo | DownloadPreset::Mp4Video => "video",
-                DownloadPreset::AudioMp3 | DownloadPreset::AudioM4a | DownloadPreset::AudioOpus => {
-                    "audio"
-                }
+                DownloadPreset::AudioMp3
+                | DownloadPreset::AudioM4a
+                | DownloadPreset::AudioOpus
+                | DownloadPreset::AudioSource
+                | DownloadPreset::AudioFlac => "audio",
                 DownloadPreset::Subtitles => "subtitles",
             });
         }
@@ -1702,6 +1783,7 @@ fn add_download_runtime_args(
     let Some(url) = args.pop() else {
         return;
     };
+    args.push("--no-color".to_string());
     args.push("--retries".to_string());
     args.push(retry_settings.download_retries.to_string());
     args.push("--file-access-retries".to_string());
@@ -1794,6 +1876,61 @@ fn decode_process_line(bytes: &[u8]) -> String {
     }
 
     String::from_utf8_lossy(line).into_owned()
+}
+
+fn parse_connection_retry(line: &str, settings: DownloadRetrySettings) -> Option<ConnectionRetry> {
+    let line = line.trim();
+    if !line.starts_with("[download]") {
+        return None;
+    }
+    let (failure, retry) = line.rsplit_once("Retrying")?;
+    let failure = failure.to_ascii_lowercase();
+    if !failure.contains("got error:")
+        || [
+            "permission denied",
+            "unable to open",
+            "file access",
+            "no space left",
+        ]
+        .iter()
+        .any(|text| failure.contains(text))
+    {
+        return None;
+    }
+    let network_error = [
+        "timed out",
+        "timeout",
+        "connection",
+        "network",
+        "unreachable",
+        "name resolution",
+        "getaddrinfo",
+        "remote end closed",
+        "incomplete read",
+        "more expected",
+        "http error 500",
+        "http error 502",
+        "http error 503",
+        "http error 504",
+    ]
+    .iter()
+    .any(|pattern| failure.contains(pattern));
+    if !network_error {
+        return None;
+    }
+    let counters = retry.rsplit_once('(')?.1.split_once(')')?.0;
+    let (attempt, logged_limit) = counters.split_once('/')?;
+    let attempt: u8 = attempt.trim().parse().ok()?;
+    let logged_limit: u8 = logged_limit.trim().parse().ok()?;
+    let limit = if retry.trim_start().starts_with("fragment") {
+        settings.fragment_retries
+    } else {
+        settings.download_retries
+    };
+    if limit == 0 || attempt == 0 || attempt > limit || logged_limit != limit {
+        return None;
+    }
+    Some(ConnectionRetry { attempt, limit })
 }
 
 pub fn parse_progress_line(line: &str) -> Option<DownloadProgress> {
@@ -1930,6 +2067,200 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn connection_retry_parser_uses_the_matching_configured_limit() {
+        let settings = DownloadRetrySettings {
+            download_retries: 7,
+            fragment_retries: 5,
+            file_access_retries: 2,
+        };
+        assert_eq!(
+            parse_connection_retry(
+                "[download] Got error: HTTP Error 503: Service Unavailable. Retrying (2/7)...",
+                settings
+            ),
+            Some(ConnectionRetry {
+                attempt: 2,
+                limit: 7
+            })
+        );
+        assert_eq!(parse_connection_retry("[download] Got error: HTTP Error 408: Request Timeout. Retrying fragment 1 (3/5)...", settings), Some(ConnectionRetry { attempt: 3, limit: 5 }));
+        assert_eq!(
+            parse_connection_retry(
+                "[download] Got error: 1000 bytes read, 49003 more expected. Retrying (1/7)...",
+                settings
+            ),
+            Some(ConnectionRetry {
+                attempt: 1,
+                limit: 7
+            })
+        );
+        for line in [
+            "[download] Got error: HTTP Error 403: Forbidden. Retrying (1/7)...",
+            "[download] Got error: unable to open file network.mp3: Permission denied. Retrying (1/7)...",
+            "WARNING: [youtube] connection timed out. Retrying (1/3)...",
+            "[download] Got error: connection reset. Retrying (8/7)...",
+            "[download] Got error: connection reset. Retrying (1/3)...",
+            "[download] Got error: connection reset. Retrying (0/7)...",
+            "[download] Got error: connection reset. Giving up after 7 retries",
+        ] { assert_eq!(parse_connection_retry(line, settings), None, "{line}"); }
+        assert_eq!(
+            parse_connection_retry(
+                "[download] Got error: connection reset. Retrying (1/7)...",
+                DownloadRetrySettings {
+                    download_retries: 0,
+                    ..settings
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn connection_retry_preserves_progress_and_clears_on_transfer_or_terminal_state() {
+        let manager = DownloadManager::new();
+        let job = manager.enqueue(sample_audio_request());
+        manager.mark_running(job.id).unwrap();
+        manager
+            .mark_progress(
+                job.id,
+                DownloadProgress {
+                    percent: 45,
+                    speed: Some("2 MB/s".into()),
+                    eta: Some("00:20".into()),
+                    phase: Some(JobPhase::DownloadingAudio),
+                },
+            )
+            .unwrap();
+        let waiting = manager
+            .mark_connection_retry(
+                job.id,
+                ConnectionRetry {
+                    attempt: 2,
+                    limit: 7,
+                },
+            )
+            .unwrap();
+        assert_eq!(waiting.state, JobState::Running);
+        assert_eq!(waiting.phase, Some(JobPhase::DownloadingAudio));
+        assert_eq!(waiting.progress_percent, Some(45));
+        assert!(waiting.speed.is_none() && waiting.eta.is_none());
+        let idle = manager
+            .mark_progress(
+                job.id,
+                DownloadProgress {
+                    percent: 45,
+                    speed: None,
+                    eta: Some("00:20".into()),
+                    phase: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(idle.connection_retry, waiting.connection_retry);
+        assert!(idle.eta.is_none());
+        let resumed = manager
+            .mark_progress(
+                job.id,
+                DownloadProgress {
+                    percent: 46,
+                    speed: Some("1 MB/s".into()),
+                    eta: Some("00:30".into()),
+                    phase: None,
+                },
+            )
+            .unwrap();
+        assert!(resumed.connection_retry.is_none());
+        assert_eq!(resumed.phase, Some(JobPhase::DownloadingAudio));
+        for state in [
+            JobState::Pending,
+            JobState::Running,
+            JobState::Paused,
+            JobState::Completed,
+            JobState::Failed,
+            JobState::Cancelled,
+        ] {
+            manager
+                .update_job(job.id, |job| {
+                    job.state = state;
+                    job.connection_retry = None;
+                })
+                .unwrap();
+            let updated = manager
+                .mark_connection_retry(
+                    job.id,
+                    ConnectionRetry {
+                        attempt: 1,
+                        limit: 5,
+                    },
+                )
+                .unwrap();
+            assert_eq!(updated.state, state);
+            assert_eq!(
+                updated.connection_retry.is_some(),
+                state == JobState::Running
+            );
+        }
+        manager.mark_running(job.id).unwrap();
+        manager
+            .mark_connection_retry(
+                job.id,
+                ConnectionRetry {
+                    attempt: 1,
+                    limit: 3,
+                },
+            )
+            .unwrap();
+        manager
+            .pause_with_process_killer(job.id, |_| Ok(()))
+            .unwrap();
+        assert!(manager.jobs()[0].connection_retry.is_none());
+        manager.mark_running(job.id).unwrap();
+        manager
+            .mark_connection_retry(
+                job.id,
+                ConnectionRetry {
+                    attempt: 1,
+                    limit: 3,
+                },
+            )
+            .unwrap();
+        assert!(manager
+            .mark_completed(job.id)
+            .unwrap()
+            .connection_retry
+            .is_none());
+        manager.mark_running(job.id).unwrap();
+        manager
+            .mark_connection_retry(
+                job.id,
+                ConnectionRetry {
+                    attempt: 1,
+                    limit: 3,
+                },
+            )
+            .unwrap();
+        assert!(manager
+            .mark_failed(job.id, "network failed".into())
+            .unwrap()
+            .connection_retry
+            .is_none());
+        manager.mark_running(job.id).unwrap();
+        manager
+            .mark_connection_retry(
+                job.id,
+                ConnectionRetry {
+                    attempt: 1,
+                    limit: 3,
+                },
+            )
+            .unwrap();
+        assert!(manager
+            .mark_post_processing(job.id)
+            .unwrap()
+            .connection_retry
+            .is_none());
+    }
 
     #[test]
     fn enqueue_creates_pending_job_with_request_snapshot() {
@@ -2790,6 +3121,7 @@ mod tests {
             vec![
                 "-o",
                 "%(title)s.%(ext)s",
+                "--no-color",
                 "--retries",
                 "12",
                 "--file-access-retries",
@@ -3082,6 +3414,47 @@ mod tests {
         assert!(!source.exists());
         assert!(!destination.join("Nature (1).webm").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn music_finalization_creates_album_folder_and_preserves_existing_track() {
+        let root = unique_test_dir("music-finalization");
+        let destination = root.join("Music");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.flac");
+        fs::write(&source, b"new audio").unwrap();
+        let mut request = sample_audio_request();
+        request.music = Some(crate::ytdlp::MusicDownloadContext {
+            collection_kind: "album".into(),
+            collection_title: Some("Album".into()),
+            source_codec: None,
+            source_quality: None,
+            create_album_folder: true,
+            metadata: crate::ytdlp::MusicMetadata {
+                title: "Song".into(),
+                artist: "Artist, Guest".into(),
+                album_artist: "Artist".into(),
+                album: "Album".into(),
+                year: "2025".into(),
+                track_number: Some(7),
+            },
+        });
+        let first = finalize_output_without_overwrite(&source, &destination, &request).unwrap();
+        assert_eq!(first, destination.join("Artist - Album/07 - Song.flac"));
+        fs::write(&source, b"second audio").unwrap();
+        let second = finalize_output_without_overwrite(&source, &destination, &request).unwrap();
+        assert_eq!(
+            second,
+            destination.join("Artist - Album/07 - Song (1).flac")
+        );
+        assert_eq!(fs::read(first).unwrap(), b"new audio");
+        assert_eq!(fs::read(second).unwrap(), b"second audio");
+        request.music.as_mut().unwrap().create_album_folder = false;
+        fs::write(&source, b"direct audio").unwrap();
+        let direct = finalize_output_without_overwrite(&source, &destination, &request).unwrap();
+        assert_eq!(direct, destination.join("07 - Song.flac"));
+        assert_eq!(fs::read(direct).unwrap(), b"direct audio");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3394,6 +3767,7 @@ mod tests {
 
     fn sample_download_request() -> DownloadRequest {
         DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             preset: DownloadPreset::Mp4Video,

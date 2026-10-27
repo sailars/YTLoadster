@@ -9,6 +9,7 @@ type Props = {
   onDestinationChange: (value: string) => void;
   onBrowse: () => void;
   buttonAriaLabel: string;
+  buttonLabel?: string;
   disabled: boolean;
   busy: boolean;
   analyzed: boolean;
@@ -28,7 +29,7 @@ export type DownloadActionButtonProps = {
 
 const downloadActionAnimationDurationMs = 980;
 
-export function DownloadSummaryCard({ tags = [], facts, destinationDir, onDestinationChange, onBrowse, buttonAriaLabel, disabled, busy, analyzed, error = null }: Props) {
+export function DownloadSummaryCard({ tags = [], facts, destinationDir, onDestinationChange, onBrowse, buttonAriaLabel, buttonLabel, disabled, busy, analyzed, error = null }: Props) {
   const { t } = useI18n();
 
   return <section className="download-summary-card" aria-label={t("common.finalFile")}>
@@ -41,7 +42,7 @@ export function DownloadSummaryCard({ tags = [], facts, destinationDir, onDestin
       busy={busy}
       analyzed={analyzed}
       disabled={disabled}
-      label={t("downloader.downloadAction")}
+      label={buttonLabel ?? t("downloader.downloadAction")}
     />
     {error ? <p className="download-action-error" role="alert">{error}</p> : null}
   </section>;
@@ -59,6 +60,8 @@ export function DownloadActionButton({
 }: DownloadActionButtonProps) {
   const [isAnimating, setIsAnimating] = useState(false);
   const animationTimer = useRef<number | null>(null);
+  const idleCopy = useRef({ label, ariaLabel });
+  if (!busy) idleCopy.current = { label, ariaLabel };
 
   useEffect(() => () => {
     if (animationTimer.current !== null) window.clearTimeout(animationTimer.current);
@@ -79,7 +82,7 @@ export function DownloadActionButton({
     <button
       className={className ? `download-action ${className}` : "download-action"}
       type={type}
-      aria-label={ariaLabel}
+      aria-label={busy ? idleCopy.current.ariaLabel : ariaLabel}
       aria-busy={busy}
       data-analyzed={analyzed}
       data-animating={isAnimating}
@@ -87,7 +90,7 @@ export function DownloadActionButton({
       onClick={handleClick}
     >
       <DownloadActionIcon />
-      <span className="download-action-label">{label}</span>
+      <span className="download-action-label">{busy ? idleCopy.current.label : label}</span>
     </button>
   );
 }

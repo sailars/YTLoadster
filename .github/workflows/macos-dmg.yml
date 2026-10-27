@@ -162,16 +162,12 @@ jobs:
             codesign --verify --strict --verbose=2 "$tool_path"
             lipo -archs "$tool_path" | grep -w "${{ matrix.expected_architecture }}"
           done
-          test -f "$app_path/Contents/Resources/COMPONENTS.txt"
           test -f "$app_path/Contents/Resources/LICENSE.txt"
           test -f "$app_path/Contents/Resources/THIRD_PARTY_NOTICES.md"
-          test -f "$app_path/Contents/Resources/DEPENDENCIES.md"
-          test -f "$app_path/Contents/Resources/FRONTEND_LICENSES.txt"
-          test -f "$app_path/Contents/Resources/DEPENDENCY_LICENSES.html"
-          test -f "$app_path/Contents/Resources/DENO_MIT.txt"
-          test -f "$app_path/Contents/Resources/YTDLP_GPL-3.0.txt"
-          test -f "$app_path/Contents/Resources/FFMPEG_LGPL-2.1.txt"
-          test -f "$app_path/Contents/Resources/LAME_LGPL-2.0.txt"
+          for document in COMPONENTS.txt DEPENDENCIES.md FRONTEND_LICENSES.txt DEPENDENCY_LICENSES.html DENO_MIT.txt YTDLP_GPL-3.0.txt FFMPEG_LGPL-2.1.txt LAME_LGPL-2.0.txt OPUS_BSD.txt Montserrat-OFL.txt Onest-OFL.txt; do
+            test -f "$app_path/Contents/Resources/LICENSE/$document"
+            test ! -e "$app_path/Contents/Resources/$document"
+          done
           "$app_path/Contents/Resources/tools/yt-dlp_macos" --version
           "$app_path/Contents/Resources/tools/deno" --version
           tools_dir="$app_path/Contents/Resources/tools"
@@ -198,6 +194,8 @@ jobs:
             done < <(otool -L "$tool_path" | tail -n +2 | awk '{ print $1 }')
           done
           "${tools_dir}/ffmpeg" -hide_banner -encoders | grep -F 'libmp3lame' >/dev/null
+          "${tools_dir}/ffmpeg" -hide_banner -encoders | grep -F 'libopus' >/dev/null
+          "${tools_dir}/ffmpeg" -hide_banner -encoders | grep -E '[[:space:]]flac[[:space:]]' >/dev/null
           "${tools_dir}/ffmpeg" -hide_banner -encoders | grep -E '[[:space:]]png[[:space:]]' >/dev/null
           smoke_dir="$(mktemp -d)"
           "${tools_dir}/ffmpeg" -y -f lavfi -i 'sine=frequency=1000:sample_rate=44100:duration=0.1' -c:a libmp3lame "${smoke_dir}/audio.mp3"
@@ -220,6 +218,7 @@ jobs:
             -show_entries stream_disposition=attached_pic \
             -of default=noprint_wrappers=1:nokey=1 \
             "${smoke_dir}/audio-with-cover.mp3" | grep -x '1'
+          YTLOADSTER_MUSIC_SMOKE_TOOLS="${tools_dir}" npm run cargo -- test --locked --manifest-path src-tauri/Cargo.toml music::tests::music_tools_roundtrip -- --ignored
           shasum -a 256 "$dmg_path"
 
       - name: Upload DMG and component manifest

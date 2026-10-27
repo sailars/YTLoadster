@@ -1,10 +1,17 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../lib/i18n";
-import { DownloadSummaryCard } from "./DownloadSummaryCard";
+import { DownloadActionButton, DownloadSummaryCard } from "./DownloadSummaryCard";
 import "../../styles.css";
 
 describe("DownloadSummaryCard", () => {
+  it("keeps the clicked label stable while more ready items arrive", () => {
+    const view = render(<DownloadActionButton analyzed disabled={false} label="Скачать готовые (1)" ariaLabel="Скачать готовые (1)" />);
+    view.rerender(<DownloadActionButton analyzed disabled busy label="Скачать готовые (2)" ariaLabel="Скачать готовые (2)" />);
+    expect(screen.getByRole("button", { name: "Скачать готовые (1)" })).toHaveTextContent("Скачать готовые (1)");
+    view.rerender(<DownloadActionButton analyzed disabled={false} label="Скачать готовые (2)" ariaLabel="Скачать готовые (2)" />);
+    expect(screen.getByRole("button", { name: "Скачать готовые (2)" })).toHaveTextContent("Скачать готовые (2)");
+  });
   it("wraps a long final format instead of truncating it", () => {
     render(
       <I18nProvider locale="ru">

@@ -10,6 +10,7 @@ import type {
   SubtitleOption,
   VideoDownloadProfile,
 } from "./types";
+import { musicAudioBytes, musicAudioLabel, musicConversionAvailable, selectMusicAudio } from "./musicModel";
 import {
   bestFormatId,
   formatCodec,
@@ -37,13 +38,16 @@ export type PlaylistFormatOptions = {
 };
 
 export type PlaylistParameters = {
+  musicMode?: boolean;
+  musicQuality?: string;
+  audioEncoders?: string[] | null;
   mode: PlaylistDownloadMode;
   videoProfile: VideoDownloadProfile;
   resolution: number | "best";
   fps: number | null;
   container: string | null;
   codec: string | null;
-  audioPreset: Extract<DownloadPreset, "audioMp3" | "audioM4a" | "audioOpus">;
+  audioPreset: Extract<DownloadPreset, "audioMp3" | "audioM4a" | "audioOpus" | "audioSource" | "audioFlac">;
   audioBitrate: string;
   audioChannels: "source" | "mono" | "stereo";
   embedMetadata: boolean;
@@ -67,7 +71,7 @@ export type PlaylistResolutionWarning =
 
 export type ResolvedPlaylistItem = {
   available: boolean;
-  reason?: ProfileUnavailableReason | "noAudio" | "noSubtitles" | "destinationMissing" | "noExactMatch";
+  reason?: ProfileUnavailableReason | "noAudio" | "noSubtitles" | "destinationMissing" | "noExactMatch" | "encoderUnavailable";
   request?: DownloadRequest;
   video?: FormatOption | null;
   audio?: FormatOption | null;
@@ -192,12 +196,13 @@ export function mediaSignatureForRequest(request: DownloadRequest) {
       },
     });
   }
-  if (request.preset === "audioMp3" || request.preset === "audioM4a" || request.preset === "audioOpus") {
+  if (request.preset === "audioMp3" || request.preset === "audioM4a" || request.preset === "audioOpus" || request.preset === "audioSource" || request.preset === "audioFlac") {
     return JSON.stringify({
       Audio: {
+        ...(request.music && request.embedMetadata ? { music_metadata: request.music.metadata } : {}),
         canonical_source: canonicalSource,
         audio_format_id: normalizedText(request.formatId),
-        output_format: request.preset === "audioM4a" ? "m4a" : request.preset === "audioOpus" ? "opus" : "mp3",
+        output_format: request.preset.replace("audio", "").toLowerCase(),
         bitrate: normalizedText(request.audioBitrate)?.toLowerCase() ?? null,
         channels: request.audioChannels === "mono" || request.audioChannels === "stereo" ? request.audioChannels : "source",
         embed_metadata: request.embedMetadata ?? false,
@@ -267,6 +272,7 @@ function resolveVideo(
   }
 
   if (!video) return unavailable("noVideo");
+  if (params.musicMode && !video.hasAudio && !audio) return unavailable("noAudio");
   const actualContainer = predictFinalVideoContainer(video, audio);
   const videoCodec = formatCodec(video);
   const label = [
@@ -406,8 +412,9 @@ function resolveAudio(
   sourceUrl: string,
   cookieSource: CookieSource | null,
 ): ResolvedPlaylistItem {
-  const audio = selectBestAudio(media.audioFormats);
+  const audio = params.musicMode ? selectMusicAudio(media.audioFormats, params.audioPreset, params.musicQuality) : selectBestAudio(media.audioFormats);
   if (!audio) return unavailable("noAudio");
+  if (params.musicMode && !musicConversionAvailable(params.audioPreset, audio, params.audioEncoders ?? null)) return unavailable("encoderUnavailable");
   const warnings: PlaylistResolutionWarning[] = [];
   const channels = params.audioChannels === "stereo" && audio.audioChannels === 1
     ? "source"
@@ -419,7 +426,7 @@ function resolveAudio(
     available: true,
     audio,
     warnings,
-    estimatedBytes: convertedAudioSize(params.audioBitrate, media.duration),
+    estimatedBytes: params.musicMode ? musicAudioBytes(audio, params.audioPreset, params.audioBitrate, media.duration) : convertedAudioSize(params.audioBitrate, media.duration),
     request: {
       url: sourceUrl,
       canonicalSource: media.webpageUrl ?? sourceUrl,
@@ -429,12 +436,12 @@ function resolveAudio(
       formatId: audio.formatId,
       audioFormatId: null,
       videoProfile: null,
-      formatLabel: `${output} ${params.audioBitrate}`,
+      formatLabel: params.musicMode ? musicAudioLabel(params.audioPreset, audio, params.audioBitrate) : `${output} ${params.audioBitrate}`,
       includeVideoTechnicalDetailsInFilename: false,
       videoTechnicalDetails: null,
       destinationDir: params.destinationDir,
       cookieSource,
-      audioBitrate: params.audioBitrate,
+      audioBitrate: params.musicMode && params.audioPreset !== "audioMp3" ? null : params.audioBitrate,
       audioChannels: channels,
       embedMetadata: params.embedMetadata,
       embedThumbnail: params.embedThumbnail,

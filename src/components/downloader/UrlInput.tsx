@@ -1,6 +1,10 @@
+import type { ReactNode } from "react";
+
 type Props = {
   id: string;
   label: string;
+  heading?: string;
+  headerAction?: ReactNode;
   value: string;
   placeholder: string;
   pasteLabel: string;
@@ -14,6 +18,8 @@ type Props = {
 export function UrlInput({
   id,
   label,
+  heading,
+  headerAction,
   value,
   placeholder,
   pasteLabel,
@@ -25,10 +31,11 @@ export function UrlInput({
 }: Props) {
   return (
     <>
-      <label className="input-label" htmlFor={id}>{label}</label>
+      <div className="url-input-heading"><label className="input-label" htmlFor={id}>{heading ?? label}</label>{headerAction}</div>
       <div className="url-row">
         <input
           id={id}
+          aria-label={label}
           value={value}
           data-has-url={Boolean(value.trim())}
           onChange={(event) => onChange(event.target.value)}

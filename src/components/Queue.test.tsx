@@ -19,9 +19,9 @@ function job(id: number, state: JobState, title: string): Job {
   };
 }
 
-function renderQueue(jobs: Job[]) {
-  return render(
-    <I18nProvider locale="ru">
+function queueElement(jobs: Job[], locale: "ru" | "en" = "ru") {
+  return (
+    <I18nProvider locale={locale}>
       <Queue
         jobs={jobs}
         onCancel={vi.fn()}
@@ -35,11 +35,37 @@ function renderQueue(jobs: Job[]) {
         onOpenFolder={vi.fn()}
         onRetry={vi.fn()}
       />
-    </I18nProvider>,
+    </I18nProvider>
   );
 }
 
+function renderQueue(jobs: Job[], locale: "ru" | "en" = "ru") {
+  return render(queueElement(jobs, locale));
+}
+
 describe("Queue status layout", () => {
+  it.each(["ru", "en"] as const)("shows connection recovery below progress with the supplied attempt limit in %s", async (locale) => {
+    const running: Job = { ...job(1, "Running", "Audio title"), phase: "DownloadingAudio", progressPercent: 45, speed: "18 MB/s", eta: "00:20", connectionRetry: { attempt: 2, limit: 7 } };
+    const view = renderQueue([running], locale);
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent(locale === "ru" ? "Восстанавливаем соединение. Попытка: 2/7" : "Reconnecting. Attempt: 2/7");
+    expect(screen.getByText(locale === "ru" ? "Нет соединения" : "No connection")).toHaveClass("queue-state-badge");
+    expect(screen.getByText("45%")).toBeInTheDocument();
+    expect(screen.queryByText("18 MB/s")).not.toBeInTheDocument();
+    expect(screen.queryByText(/00:20/)).not.toBeInTheDocument();
+    const progress = document.querySelector(".progress-track")!;
+    expect(progress.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("button", { name: locale === "ru" ? "Пауза Audio title" : "Pause Audio title" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: locale === "ru" ? "Загружается · 1" : "Downloading · 1" }));
+    expect(screen.getByRole("status")).toBe(notice);
+    view.rerender(queueElement([{ ...running, connectionRetry: null, speed: "1 MB/s", eta: "00:15" }], locale));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByText("1 MB/s")).toBeInTheDocument();
+    view.rerender(queueElement([{ ...running, state: "Failed", error: "network failed" }], locale));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByText(locale === "ru" ? "Нет соединения" : "No connection")).not.toBeInTheDocument();
+  });
+
   it("explains why a queued download cannot refresh its live YouTube session", () => {
     renderQueue([{ ...job(1, "Failed", "Account video"), error: "youtube-auth-refresh-failed" }]);
     expect(screen.getByText(/не удалось обновить сессию YouTube/i)).toBeInTheDocument();

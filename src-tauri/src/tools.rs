@@ -161,6 +161,47 @@ impl ToolEnvironment {
 }
 
 #[tauri::command]
+pub async fn get_audio_encoders(app: AppHandle) -> Result<Vec<String>, String> {
+    let inventory = discover_tools(
+        ToolConfig::default(),
+        ToolEnvironment::current_for_app(&app),
+    );
+    let path = inventory
+        .ffmpeg
+        .path
+        .ok_or_else(|| "missingTool".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || audio_encoders(&path))
+        .await
+        .map_err(|_| "missingTool".to_string())?
+}
+
+pub fn audio_encoders(path: &Path) -> Result<Vec<String>, String> {
+    let mut command = std::process::Command::new(path);
+    command.args(["-hide_banner", "-encoders"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command.output().map_err(|_| "missingTool".to_string())?;
+    if !output.status.success() {
+        return Err("missingTool".to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let flags = fields.next()?;
+            if flags.starts_with('A') {
+                fields.next().map(str::to_string)
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
 pub fn get_tool_status(app: AppHandle) -> ToolInventory {
     discover_tools(
         ToolConfig::default(),

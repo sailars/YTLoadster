@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState, type ReactNode } from "react";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api } from "../lib/api";
 import { NoticeCountdown, noticeDurationMs } from "./NoticeCountdown";
@@ -23,8 +23,12 @@ import type {
 } from "../lib/types";
 import { makeCookieSource } from "../lib/playlistModel";
 import { AudioDownloadOptions } from "./downloader/AudioDownloadOptions";
+import { MusicDownloadSummary } from "./music/MusicDownloadSummary";
+import { MusicAudioOptions, MusicMetadataEditor, MusicModeTabs, MusicParametersGroup } from "./music/MusicControls";
+import { musicMetadata, musicAudioLabel, musicAudioBytes, musicConversionAvailable, selectMusicAudio, withMusicContext, type MusicAudioPreset, type MusicEdits } from "../lib/musicModel";
 import { DownloadModeTabs } from "./downloader/DownloadModeTabs";
 import { MediaPreview } from "./downloader/MediaPreview";
+import { UrlInput } from "./downloader/UrlInput";
 import {
   preferredSubtitleFormat,
   SubtitleDownloadOptions,
@@ -35,8 +39,17 @@ import { bestFormatId, formatCodec, formatExt, formatFps, formatHeight, predictF
 import { DownloadSummaryCard, type SummaryFact } from "./downloader/DownloadSummaryCard";
 import { loadSavedVideoProfile, resolveVideoProfile, saveVideoProfile, type ResolvedVideoProfile } from "./downloader/videoProfiles";
 import type { VideoDownloadProfile } from "../lib/types";
+import type { SingleWorkspace, WorkspaceKey, WorkspaceView } from "../lib/workspace";
 
 type Props = {
+  initialWorkspace?: SingleWorkspace;
+  workspacePersistenceEnabled?: boolean;
+  workspaceKey?: WorkspaceKey;
+  onWorkspaceChange?: (key: WorkspaceKey, view: WorkspaceView) => void;
+  settingsResetVersion?: number;
+  musicMode?: boolean;
+  audioEncoders?: string[] | null;
+  sourceHeaderAction?: ReactNode;
   authSettings: BrowserAuthSettings;
   defaultDestinationDir?: string | null;
   includeVideoTechnicalDetailsInFilename: boolean;
@@ -49,12 +62,20 @@ type Props = {
   onJobCreated: (job: Job) => void;
 };
 
-const audioPresets: DownloadPreset[] = ["audioMp3", "audioM4a", "audioOpus"];
+const audioPresets: DownloadPreset[] = ["audioMp3", "audioM4a", "audioOpus", "audioSource", "audioFlac"];
 type DownloadMode = "video" | "audio" | "subtitles";
 type DuplicateKind = DownloadMode;
 type DuplicateErrorState = { kind: DuplicateKind; signature: string };
 
 export function Downloader({
+  initialWorkspace,
+  workspacePersistenceEnabled = false,
+  workspaceKey = "new",
+  onWorkspaceChange,
+  settingsResetVersion = 0,
+  musicMode = false,
+  audioEncoders = null,
+  sourceHeaderAction,
   authSettings,
   defaultDestinationDir,
   includeVideoTechnicalDetailsInFilename,
@@ -68,17 +89,20 @@ export function Downloader({
 }: Props) {
   const { locale, t } = useI18n();
   const [destinationDir, setDestinationDir] = useState("");
-  const [mode, setMode] = useState<DownloadMode>("video");
-  const [preset, setPreset] = useState<DownloadPreset>("bestVideo");
+  const [mode, setMode] = useState<DownloadMode>(musicMode ? "audio" : "video");
+  const [preset, setPreset] = useState<DownloadPreset>(musicMode ? "audioSource" : "bestVideo");
+  const [musicEdits, setMusicEdits] = useState<MusicEdits>({});
+  const [musicCollection, setMusicCollection] = useState<Parameters<typeof withMusicContext>[3]>();
+  const [musicQuality, setMusicQuality] = useState("best");
   const [videoProfile, setVideoProfile] = useState<VideoDownloadProfile>(() => loadSavedVideoProfile());
   const [selectedVideoFormatId, setSelectedVideoFormatId] = useState<string | null>(null);
   const [selectedAudioFormatId, setSelectedAudioFormatId] = useState<string | null>(null);
   const [selectedSubtitleKey, setSelectedSubtitleKey] = useState<string | null>(null);
   const [selectedSubtitleFormat, setSelectedSubtitleFormat] = useState<string | null>(null);
   const [audioBitrate, setAudioBitrate] = useState("320K");
-  const [audioChannels, setAudioChannels] = useState("stereo");
-  const [embedMetadata, setEmbedMetadata] = useState(false);
-  const [embedThumbnail, setEmbedThumbnail] = useState(false);
+  const [audioChannels, setAudioChannels] = useState(musicMode ? "source" : "stereo");
+  const [embedMetadata, setEmbedMetadata] = useState(musicMode);
+  const [embedThumbnail, setEmbedThumbnail] = useState(musicMode);
   const [media, setMedia] = useState<MediaInfo | null>(null);
   const [analyzedUrl, setAnalyzedUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -91,6 +115,11 @@ export function Downloader({
   const restoredRepeat = useRef<string | null>(null);
   const previousDefaultDestinationDir = useRef<string | null>(null);
   const analysisSequence = useRef(0);
+  const restoredWorkspaceConsumed = useRef(false);
+  const restoredWorkspaceUrl = useRef<string | null>(null);
+  const restoredWorkspaceAuth = useRef<string | null>(null);
+  const restoredWorkspaceDraftUrl = useRef<string | null>(null);
+  const metadataUrl = useRef<string | null>(null);
   useEffect(() => {
     if (!enqueueResult) return;
     const timeout = window.setTimeout(() => setEnqueueResult(null), noticeDurationMs);
@@ -109,7 +138,12 @@ export function Downloader({
     embedMetadata,
     embedThumbnail,
     subtitle: selectedSubtitleRequest(),
-  });
+  }) + (musicMode ? JSON.stringify([musicEdits, musicQuality]) : "");
+
+  useEffect(() => {
+    if (!musicMode || !media || mode !== "audio") return;
+    setSelectedAudioFormatId(selectMusicAudio(media.audioFormats, preset, musicQuality)?.formatId ?? null);
+  }, [musicMode, media, mode, preset, musicQuality]);
 
   useEffect(() => {
     if (defaultDestinationDir === undefined) {
@@ -127,7 +161,28 @@ export function Downloader({
 
   useEffect(() => {
     const currentUrl = url.trim();
-    const analysisId = `single-${Date.now()}-${++analysisSequence.current}`;
+    const authKey = JSON.stringify([authSettings.useBrowserCookies, authSettings.useYoutubeSession, authSettings.browser]);
+    if (restoredWorkspaceUrl.current === currentUrl && sourceIsVideo && restoredWorkspaceAuth.current === authKey) return;
+    restoredWorkspaceUrl.current = null;
+    restoredWorkspaceDraftUrl.current = null;
+    if (!restoredWorkspaceConsumed.current && initialWorkspace?.url === currentUrl && sourceIsVideo) {
+      restoredWorkspaceConsumed.current = true;
+      const saved = initialWorkspace;
+      restoredWorkspaceDraftUrl.current = currentUrl;
+      setMode(saved.mode); setPreset(saved.preset); setDestinationDir(saved.destinationDir);
+      setVideoProfile(saved.videoProfile); setSelectedVideoFormatId(saved.selectedVideoFormatId);
+      setSelectedAudioFormatId(saved.selectedAudioFormatId); setSelectedSubtitleKey(saved.selectedSubtitleKey);
+      setSelectedSubtitleFormat(saved.selectedSubtitleFormat); setAudioBitrate(saved.audioBitrate);
+      setAudioChannels(saved.audioChannels); setEmbedMetadata(saved.embedMetadata); setEmbedThumbnail(saved.embedThumbnail);
+      setMusicQuality(saved.musicQuality); setMusicEdits(saved.musicEdits); setMusicCollection(saved.musicCollection);
+      if (saved.media) {
+        restoredWorkspaceUrl.current = currentUrl;
+        restoredWorkspaceAuth.current = authKey;
+        setMedia(saved.media); setAnalyzedUrl(currentUrl); setIsAnalyzing(false); setError(null);
+        return;
+      }
+    }
+    const analysisId = `${musicMode ? "music" : "single"}-${Date.now()}-${++analysisSequence.current}`;
     setMedia(null);
     setAnalyzedUrl(null);
     setSelectedVideoFormatId(null);
@@ -176,7 +231,7 @@ export function Downloader({
         }
         setSelectedVideoFormatId(resolved.videoFormatId);
         setSelectedAudioFormatId(profile === "best" ? bestAudioFormatId : resolved.audioFormatId);
-        setAudioChannels(result.audioFormats.find((format) => format.formatId === bestAudioFormatId)?.audioChannels === 1 ? "source" : "stereo");
+        setAudioChannels(musicMode || result.audioFormats.find((format) => format.formatId === bestAudioFormatId)?.audioChannels === 1 ? "source" : "stereo");
         selectSubtitle(result.subtitles?.[0] ?? null);
       } catch (err) {
         if (isCurrent) setError(readableError(err, authSettings.browser, locale, t));
@@ -190,7 +245,26 @@ export function Downloader({
       window.clearTimeout(timeout);
       void api.cancelUrlAnalysis(analysisId).catch(() => undefined);
     };
-  }, [url, sourceIsVideo, authSettings.useBrowserCookies, authSettings.useYoutubeSession, authSettings.browser, locale, t]);
+  }, [url, sourceIsVideo, authSettings.useBrowserCookies, authSettings.useYoutubeSession, authSettings.browser, locale, t, initialWorkspace]);
+
+  useEffect(() => {
+    if (metadataUrl.current === url.trim()) return;
+    metadataUrl.current = url.trim();
+    if (restoredWorkspaceDraftUrl.current !== url.trim()) { setMusicEdits({}); setMusicCollection(undefined); }
+  }, [url]);
+
+  useEffect(() => {
+    if (!workspacePersistenceEnabled || !sourceIsVideo || !url.trim()) return;
+    onWorkspaceChange?.(workspaceKey, {
+      kind: "single", url: url.trim(), media: analyzedUrl === url.trim() ? media : null,
+      mode, preset, destinationDir, videoProfile, selectedVideoFormatId, selectedAudioFormatId,
+      selectedSubtitleKey, selectedSubtitleFormat, audioBitrate, audioChannels, embedMetadata, embedThumbnail,
+      musicQuality, musicEdits, musicCollection,
+    });
+  }, [workspacePersistenceEnabled, workspaceKey, onWorkspaceChange, url, sourceIsVideo, analyzedUrl, media,
+    mode, preset, destinationDir, videoProfile, selectedVideoFormatId, selectedAudioFormatId,
+    selectedSubtitleKey, selectedSubtitleFormat, audioBitrate, audioChannels, embedMetadata, embedThumbnail,
+    musicQuality, musicEdits, musicCollection]);
 
   useEffect(() => {
     const request = repeatDraft?.request;
@@ -200,6 +274,16 @@ export function Downloader({
     setAudioChannels(request.audioChannels ?? "source");
     setEmbedMetadata(request.embedMetadata ?? false);
     setEmbedThumbnail(request.embedThumbnail ?? false);
+    if (musicMode && request.music) {
+      setMusicEdits(request.music.metadata);
+      setMusicQuality(request.music.sourceQuality ?? "best");
+      setMusicCollection(request.music.collectionKind === "single" ? undefined : {
+        kind: request.music.collectionKind,
+        createAlbumFolder: request.music.createAlbumFolder,
+        title: request.music.collectionTitle ?? "",
+        index: request.music.metadata.trackNumber ?? 1,
+      });
+    }
     if (request.preset === "subtitles") changeMode("subtitles");
     else if (audioPresets.includes(request.preset)) {
       changeMode("audio");
@@ -227,7 +311,7 @@ export function Downloader({
       return;
     }
     if (audioPresets.includes(request.preset)) {
-      setSelectedAudioFormatId(bestFormatId(media.audioFormats));
+      setSelectedAudioFormatId(musicMode ? selectMusicAudio(media.audioFormats, request.preset, request.music?.sourceQuality)?.formatId ?? null : bestFormatId(media.audioFormats));
       return;
     }
 
@@ -304,7 +388,7 @@ export function Downloader({
   function buildRequest(): DownloadRequest | null {
     const formatId = selectedFormatId();
     if (!formatId) return null;
-    return {
+    const request: DownloadRequest = {
       url: url.trim(),
       canonicalSource: media?.webpageUrl ?? analyzedUrl ?? url.trim(),
       title: media?.title ?? null,
@@ -318,12 +402,13 @@ export function Downloader({
       videoTechnicalDetails: mode === "video" ? selectedVideoTechnicalDetails() : null,
       destinationDir,
       cookieSource: makeCookieSource(authSettings),
-      audioBitrate: mode === "audio" ? audioBitrate : null,
+      audioBitrate: mode === "audio" && (!musicMode || preset === "audioMp3") ? audioBitrate : null,
       audioChannels: mode === "audio" ? audioChannels : null,
       embedMetadata: mode === "audio" ? embedMetadata : null,
       embedThumbnail: mode === "audio" ? embedThumbnail : null,
       subtitle: mode === "subtitles" ? selectedSubtitleRequest() : null,
     };
+    return musicMode && media ? withMusicContext(request, media, musicEdits, musicCollection, musicQuality) : request;
   }
 
   async function submitRequest(request: DownloadRequest, submittedDuplicateSignature: string | null) {
@@ -364,7 +449,7 @@ export function Downloader({
   function changeMode(nextMode: DownloadMode) {
     setMode(nextMode);
     if (nextMode === "audio") {
-      setPreset((current) => (audioPresets.includes(current) ? current : "audioMp3"));
+      setPreset((current) => (audioPresets.includes(current) ? current : musicMode ? "audioSource" : "audioMp3"));
     } else if (nextMode === "subtitles") {
       setPreset("subtitles");
     } else {
@@ -399,6 +484,25 @@ export function Downloader({
     setSelectedAudioFormatId(resolved.audioFormatId);
   }
 
+  const appliedSettingsReset = useRef(0);
+  useEffect(() => {
+    if (appliedSettingsReset.current === settingsResetVersion) return;
+    appliedSettingsReset.current = settingsResetVersion;
+    setDestinationDir(defaultDestinationDir ?? "Downloads");
+    setMode(musicMode ? "audio" : "video");
+    setPreset(musicMode ? "audioSource" : "bestVideo");
+    setMusicQuality("best");
+    setVideoProfile("best");
+    const resolved = media ? resolveVideoProfile("best", media.videoFormats, media.audioFormats) : null;
+    setSelectedVideoFormatId(resolved?.videoFormatId ?? null);
+    setSelectedAudioFormatId(resolved?.audioFormatId ?? null);
+    setAudioBitrate("320K");
+    setAudioChannels(musicMode ? "source" : "stereo");
+    setEmbedMetadata(musicMode);
+    setEmbedThumbnail(musicMode);
+    selectSubtitle(media?.subtitles?.[0] ?? null);
+  }, [settingsResetVersion, defaultDestinationDir, musicMode, media]);
+
   function changeManualVideoFormat(formatId: string | null) {
     setVideoProfile("custom");
     setPreset("mp4Video");
@@ -421,6 +525,7 @@ export function Downloader({
   }
 
   function selectedFormatLabel() {
+    if (musicMode && mode === "audio") return musicAudioLabel(preset, media?.audioFormats.find((format) => format.formatId === selectedAudioFormatId), audioBitrate);
     if (mode === "subtitles") {
       const subtitle = selectedSubtitle();
       if (!subtitle || !selectedSubtitleFormat) return null;
@@ -507,6 +612,8 @@ export function Downloader({
   }
 
   function canDownload() {
+    if (musicMode && mode === "audio" && (!media || !musicConversionAvailable(preset, media.audioFormats.find((format) => format.formatId === selectedAudioFormatId), audioEncoders))) return false;
+    if (musicMode && mode === "video" && !musicClipAvailable()) return false;
     return Boolean(
       url.trim() &&
         media &&
@@ -519,27 +626,75 @@ export function Downloader({
     );
   }
 
-  return (
-    <section className="download-panel" aria-label={t("downloader.label")}>
-      <form onSubmit={enqueue}>
-        <div className="download-workspace">
-          <MediaPreview
-            url={url}
-            media={media}
-            error={error}
-            isAnalyzing={isAnalyzing}
-            onUrlChange={onUrlChange}
-            onPaste={pasteUrlFromClipboard}
-            onClear={clearUrl}
-            onOpen={openAnalyzedUrl}
-            onCopy={copyAnalyzedUrl}
-          />
+  function musicClipAvailable() {
+    const video = media?.videoFormats.find((format) => format.formatId === selectedVideoFormatId);
+    return Boolean(video && (video.hasAudio || media?.audioFormats.some((format) => format.formatId === selectedAudioFormatId)));
+  }
 
-          <div className="options-column">
+  const enqueueNotice = enqueueResult ? (
+    <div className={`${musicMode ? "playlist-batch-feedback all-added" : "inline-notice success-notice"} single-enqueue-result`} role="status">
+      <NoticeCountdown key={enqueueResult.id} />
+      <strong>
+        {enqueueResult.mode === "audio"
+          ? t("downloader.enqueuedAudio")
+          : enqueueResult.mode === "subtitles"
+            ? t("downloader.enqueuedSubtitles")
+            : t("downloader.enqueuedVideo")}
+      </strong>
+      <button type="button" className="secondary" onClick={onOpenQueue}>{t("playlist.openQueue")}</button>
+    </div>
+  ) : null;
+
+  const preview = (
+    <MediaPreview
+      music={musicMode}
+      url={url}
+      media={media}
+      onOpen={openAnalyzedUrl}
+      onCopy={copyAnalyzedUrl}
+    />
+  );
+
+  return (
+    <section className={`download-panel download-source-panel${musicMode ? " music-single" : ""}`} aria-label={t(musicMode ? "nav.music" : "downloader.label")}>
+      <form onSubmit={enqueue}>
+        <div className="playlist-url-card source-url-card">
+          <UrlInput id={musicMode ? "music-track-url" : "video-url"} label={t(musicMode ? "music.url" : "media.url")} heading={t(musicMode ? "music.addUrl" : "media.emptyTitle")} headerAction={sourceHeaderAction} value={url} placeholder={t(musicMode ? "music.urlPlaceholder" : "media.placeholder")} pasteLabel={t("media.paste")} pasteTooltip={t("media.pasteTooltip")} clearLabel={t("media.clear")} onChange={onUrlChange} onPaste={pasteUrlFromClipboard} onClear={clearUrl} />
+          {error ? <p className="error source-analysis-feedback" role="alert">{error}</p> : null}
+          {isAnalyzing ? <p className="analysis-status source-analysis-feedback" role="status">{t("media.analyzing")}</p> : null}
+        </div>
+        <div className="download-workspace" data-has-media={Boolean(media) && !isAnalyzing}>
+          {musicMode ? <div className="music-single-content">
+            {preview}
+            {media && !isAnalyzing ? <MusicDownloadSummary
+              count={1}
+              video={mode === "video"}
+              size={mode === "audio" ? musicAudioSize(media, selectedAudioFormatId, preset, audioBitrate, locale, t) : knownSize(media.videoFormats.find((format) => format.formatId === selectedVideoFormatId)?.filesize, media.audioFormats.find((format) => format.formatId === selectedAudioFormatId)?.filesize, t)}
+              facts={mode === "audio" ? [
+                { label: t("audio.codec"), value: preset === "audioSource" ? t("music.original") : preset.replace("audio", "").toUpperCase() },
+                { label: t("music.sourceQuality"), value: musicQuality === "best" ? t("music.best") : t("music.upTo", { bitrate: musicQuality }) },
+                ...(preset === "audioMp3" ? [{ label: t("audio.bitrate"), value: audioBitrate.replace("K", " kbps") }] : []),
+              ] : summaryFacts(mode, media, selectedVideoFormatId, selectedAudioFormatId, selectedSubtitle(), selectedSubtitleFormat, preset, audioBitrate, audioChannels, t).filter((fact) => fact.label !== t("common.size"))}
+              destinationDir={destinationDir}
+              onDestinationChange={setDestinationDir}
+              onBrowse={chooseDestinationDir}
+              action={{
+                ariaLabel: t("playlist.enqueueSelected", { count: 1 }),
+                label: t("playlist.enqueueSelected", { count: 1 }),
+                busy: isEnqueueing, analyzed: true, disabled: isEnqueueing || !canDownload(),
+              }}
+            >
+              {duplicateError ? <p className="download-action-error" role="alert">{t(duplicateErrorTranslationKey(duplicateError.kind))}</p> : null}
+              {enqueueNotice}
+            </MusicDownloadSummary> : enqueueNotice}
+          </div> : preview}
+
+          {media && !isAnalyzing ? <div className={`options-column${musicMode ? " music-download-controls" : ""}`}>
             <section className="mode-section" aria-label={t("downloader.mode")}>
-              <DownloadModeTabs mode={mode} onChange={changeMode} />
+              {musicMode ? <MusicModeTabs mode={mode} onChange={changeMode} /> : <DownloadModeTabs mode={mode} onChange={changeMode} />}
             </section>
-            <h3 className="download-parameters-heading">{t("playlist.parameters")}</h3>
+            <MusicParametersGroup enabled={musicMode}>
+            {musicMode && mode === "video" && media && !musicClipAvailable() ? <p className="music-format-note">{t("music.videoUnavailable")}</p> : null}
 
             {mode === "video" ? (
               <VideoDownloadOptions
@@ -549,6 +704,11 @@ export function Downloader({
                 onProfileChange={changeVideoProfile}
                 onManualFormatChange={changeManualVideoFormat}
               />
+            ) : mode === "audio" && musicMode ? (
+              <>
+                <MusicAudioOptions preset={preset as MusicAudioPreset} bitrate={audioBitrate} quality={musicQuality} embedMetadata={embedMetadata} embedThumbnail={embedThumbnail} formats={media?.audioFormats ?? []} encoders={audioEncoders} onPreset={setPreset} onBitrate={setAudioBitrate} onQuality={setMusicQuality} onMetadata={setEmbedMetadata} onThumbnail={setEmbedThumbnail} />
+                {media ? <MusicMetadataEditor value={{ ...musicMetadata(media), ...musicEdits }} onChange={(patch) => setMusicEdits((current) => ({ ...current, ...patch }))} onReset={() => setMusicEdits({})} /> : null}
+              </>
             ) : mode === "audio" ? (
               <AudioDownloadOptions
                 preset={preset}
@@ -572,7 +732,8 @@ export function Downloader({
                 onFormatChange={setSelectedSubtitleFormat}
               />
             )}
-            <DownloadSummaryCard
+            </MusicParametersGroup>
+            {!musicMode ? <DownloadSummaryCard
               tags={summaryTags(mode, media, selectedVideoFormatId, t)}
               facts={summaryFacts(mode, media, selectedVideoFormatId, selectedAudioFormatId, selectedSubtitle(), selectedSubtitleFormat, preset, audioBitrate, audioChannels, t)}
               destinationDir={destinationDir}
@@ -583,22 +744,10 @@ export function Downloader({
               analyzed={Boolean(media) && !isAnalyzing}
               disabled={isEnqueueing || !canDownload()}
               error={duplicateError ? t(duplicateErrorTranslationKey(duplicateError.kind)) : null}
-            />
-          </div>
+            /> : null}
+          </div> : null}
         </div>
-        {enqueueResult ? (
-          <div className="inline-notice success-notice single-enqueue-result" role="status">
-            <NoticeCountdown key={enqueueResult.id} />
-            <strong>
-              {enqueueResult.mode === "audio"
-                ? t("downloader.enqueuedAudio")
-                : enqueueResult.mode === "subtitles"
-                  ? t("downloader.enqueuedSubtitles")
-                  : t("downloader.enqueuedVideo")}
-            </strong>
-            <button type="button" className="secondary" onClick={onOpenQueue}>{t("playlist.openQueue")}</button>
-          </div>
-        ) : null}
+        {!musicMode ? enqueueNotice : null}
       </form>
       {pendingHistoryDuplicate ? (
         <div className="dialog-backdrop" role="presentation">
@@ -724,6 +873,11 @@ function summaryFacts(
     { label: t("video.fps"), value: video ? formatFps(video) ?? "-" : "-" },
     { label: t("common.size"), value: knownSize(video?.filesize, audio?.filesize, t) },
   ];
+}
+
+function musicAudioSize(media: MediaInfo | null, audioId: string | null, preset: DownloadPreset, bitrate: string, locale: AppLocale, t: Translate) {
+  const bytes = musicAudioBytes(media?.audioFormats.find((format) => format.formatId === audioId), preset, bitrate, media?.duration);
+  return bytes == null ? t("common.unknown") : t("music.estimatedSizeMb", { size: new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(bytes / 1024 ** 2) });
 }
 
 function knownSize(videoSize: number | null | undefined, audioSize: number | null | undefined, t: Translate) {
