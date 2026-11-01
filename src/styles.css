@@ -9272,6 +9272,26 @@ button.primary:hover:not(:disabled),
 }
 .source-empty > svg { fill: none; }
 .source-empty > svg .icon-solid { fill: currentColor; }
+.source-empty > .music-liked-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  max-width: 100%;
+  min-height: 38px;
+  margin-top: 10px;
+  padding: 8px 14px;
+  border: 1px solid var(--azure-accent-border, #72baff);
+  border-radius: 7px;
+  background: var(--azure-accent-soft, #edf7ff);
+  color: var(--azure-accent, #0a84ff);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  box-shadow: none;
+}
+.source-empty > .music-liked-action:hover { background: var(--azure-accent-soft); border-color: var(--azure-accent); }
+.source-empty > .music-liked-action svg { width: 19px; height: 19px; flex-shrink: 0; }
 :root[data-theme="dark"] .source-url-card > .url-input-heading,
 :root[data-theme="dark"] .download-source-panel .download-workspace[data-has-media="true"] { border-color: #293640; }
 :root[data-theme="dark"] .source-url-card .url-input-heading > .input-label { color: #dce6ed; }

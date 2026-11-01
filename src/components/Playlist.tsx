@@ -35,6 +35,7 @@ import type {
 import { ParameterSelect, type ParameterSelectOption } from "./ParameterSelect";
 import { MediaThumbnail } from "./MediaThumbnail";
 import { PlaylistDownloadIcon } from "./PlaylistDownloadIcon";
+import { YouTubeMusicIcon } from "./YouTubeMusicIcon";
 import { AudioWaveIcon } from "./downloader/AudioWaveIcon";
 import { DownloadActionButton } from "./downloader/DownloadSummaryCard";
 import { DownloadModeTabs } from "./downloader/DownloadModeTabs";
@@ -941,6 +942,12 @@ export function Playlist({
         <div className="section-empty playlist-empty error-state">
           <strong>{t("playlist.loadErrorTitle")}</strong>
           <span>{playlistError}</span>
+        </div>
+      ) : collectionKind === "liked" && playlist?.entries.length === 0 ? (
+        <div className="section-empty playlist-empty" role="status">
+          <YouTubeMusicIcon />
+          <strong>{t("music.likedEmptyTitle")}</strong>
+          <span>{t("music.likedEmptyText")}</span>
         </div>
       ) : playlist ? (
         <>

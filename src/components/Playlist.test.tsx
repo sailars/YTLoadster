@@ -139,6 +139,34 @@ function playlistElement(options: {
 }
 
 describe("Playlist", () => {
+  it.each([
+    ["ru", "В понравившихся пока нет треков", "Добавьте треки в понравившиеся в YouTube Music и откройте коллекцию заново."],
+    ["en", "No liked songs yet", "Like some songs in YouTube Music, then open this collection again."],
+  ] as const)("explains an empty liked collection without empty download controls (%s)", async (locale, title, text) => {
+    vi.mocked(api.probePlaylist).mockResolvedValueOnce({ id: "LM", musicKind: "liked", title: "Liked Music", entries: [] });
+    renderMusicCollection(locale);
+    expect(await screen.findByText(title)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(text);
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("textbox")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: /Скачать|Download/ })).not.toBeInTheDocument();
+    expect(api.probePlaylistItem).not.toHaveBeenCalled();
+  });
+
+  it("explains a restored empty liked collection without starting a new analysis", () => {
+    const saved: CollectionWorkspace = {
+      kind: "collection", url: "https://youtube.com/playlist?list=PL-test",
+      playlist: { id: "LM", musicKind: "liked", title: "Liked Music", entries: [] }, rows: [],
+      params: { ...defaultPlaylistParameters, musicMode: true, mode: "audio", audioPreset: "audioSource" },
+      musicEdits: {}, albumEdits: {}, createAlbumFolder: true, layout: "wide",
+    };
+    renderPlaylist({ musicMode: true, initialWorkspace: saved });
+    expect(screen.getByRole("status")).toHaveTextContent("В понравившихся пока нет треков");
+    expect(screen.queryByRole("button", { name: /Скачать/ })).not.toBeInTheDocument();
+    expect(api.probePlaylist).not.toHaveBeenCalled();
+    expect(api.probePlaylistItem).not.toHaveBeenCalled();
+  });
+
   it("shows saved album fields even when every restored song is still pending", async () => {
     const info = { ...playlistInfo(2), musicKind: "album" as const };
     const saved: CollectionWorkspace = {

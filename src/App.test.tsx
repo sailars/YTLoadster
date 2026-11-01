@@ -237,7 +237,7 @@ describe("App", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Альбом" }), { target: { value: "Edited album" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Год" }), { target: { value: "2026" } });
     await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
-    await userEvent.click(screen.getByRole("checkbox", { name: "Восстанавливать открытые разделы" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Восстанавливать предыдущий сеанс работы" }));
     await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ restoreWorkspace: true }));
     await userEvent.click(screen.getByRole("button", { name: "YouTube Music" }));
     await userEvent.click(screen.getByRole("tab", { name: "Клип" }));
@@ -331,7 +331,7 @@ describe("App", () => {
     saveWorkspace(saved);
     const view = render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
-    const restore = screen.getByRole("checkbox", { name: "Восстанавливать открытые разделы" });
+    const restore = screen.getByRole("checkbox", { name: "Восстанавливать предыдущий сеанс работы" });
     if (enabled) expect(restore).toBeChecked(); else expect(restore).not.toBeChecked();
     await userEvent.click(screen.getByRole("button", { name: "Новая загрузка" }));
     if (!enabled) {
@@ -364,7 +364,7 @@ describe("App", () => {
     saveWorkspace(emptyWorkspace());
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /^Настройки$/ }));
-    await userEvent.click(screen.getByRole("checkbox", { name: "Восстанавливать открытые разделы" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Восстанавливать предыдущий сеанс работы" }));
     await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ restoreWorkspace: false }));
     await waitFor(() => expect(window.localStorage.getItem(workspaceStorageKey)).toBeNull());
   });
@@ -379,8 +379,9 @@ describe("App", () => {
     expect(screen.queryByRole("region", { name: "Итоговая загрузка" })).not.toBeInTheDocument();
     expect(screen.getByText(preview, { selector: ".section-empty strong" })).toBeInTheDocument();
     if (section === "YouTube Music") {
-      const liked = screen.getByRole("button", { name: "Понравившиеся" });
-      expect(liked.closest(".url-input-heading")).not.toBeNull();
+      const liked = screen.getByRole("button", { name: "Открыть любимые треки" });
+      expect(liked.closest(".source-empty")).not.toBeNull();
+      expect(liked.closest(".url-input-heading")).toBeNull();
     }
   });
   it.each(["new", "playlist"])("routes a musical URL from %s to YouTube Music", async (origin) => {
@@ -392,6 +393,9 @@ describe("App", () => {
     await waitFor(() => expect(api.probeUrl).toHaveBeenCalledWith("https://music.youtube.com/watch?v=music-song", null, expect.any(String)));
     expect(screen.getByRole("tab", { name: "Трек" })).toHaveAttribute("aria-selected", "true");
     expect(api.probePlaylist).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Открыть любимые треки" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Очистить" }));
+    expect(screen.getByRole("button", { name: "Открыть любимые треки" }).closest(".source-empty")).not.toBeNull();
   });
 
   it.each([
@@ -410,11 +414,39 @@ describe("App", () => {
   it("opens existing authorization settings for liked music without a session", async () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "YouTube Music" }));
-    await userEvent.click(screen.getByRole("button", { name: "Понравившиеся" }));
+    await userEvent.click(screen.getByRole("button", { name: "Открыть любимые треки" }));
     expect(screen.getByText(/для этой коллекции войдите в YouTube/i)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Открыть авторизацию" }));
     expect(await screen.findByRole("tab", { name: "Авторизация" })).toHaveAttribute("aria-selected", "true");
     expect(api.probePlaylist).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["ru", "session", "Открыть любимые треки", "Понравившиеся"],
+    ["en", "session", "Open liked songs", "Liked songs"],
+    ["ru", "browser", "Открыть любимые треки", "Понравившиеся"],
+    ["en", "browser", "Open liked songs", "Liked songs"],
+  ] as const)("analyzes liked music with a separate collection label (%s, %s)", async (locale, auth, action, collectionLabel) => {
+    window.localStorage.setItem(localeStorageKey, locale);
+    if (auth === "browser") window.localStorage.setItem(browserAuthStorageKey, JSON.stringify({ useBrowserCookies: true, useYoutubeSession: false, browser: "librewolf" }));
+    vi.mocked(api.getYoutubeAuthStatus).mockResolvedValueOnce({ supported: true, authenticated: auth === "session", browser: auth === "session" ? "Microsoft Edge" : null });
+    const cookies = auth === "session" ? { kind: "youtubeSession" } : { kind: "browser", value: { browser: "librewolf", profile: null } };
+    vi.mocked(api.probePlaylist).mockResolvedValueOnce({
+      id: "LM", musicKind: "liked", title: "Liked Music",
+      entries: [{ id: "liked-song", index: 1, title: "Liked track", url: "https://music.youtube.com/watch?v=liked-song", duration: 90 }],
+    });
+    vi.mocked(api.probePlaylistItem).mockResolvedValueOnce({
+      entryId: "0:liked-song", state: "ready",
+      media: { title: "Liked track", webpageUrl: "https://music.youtube.com/watch?v=liked-song", duration: 90,
+        videoFormats: [], audioFormats: [{ formatId: "251", qualityLabel: "Opus", kind: "audio", ext: "webm", codec: "opus", bitrateKbps: 128 }], subtitles: [] },
+    });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "YouTube Music" }));
+    await userEvent.click(screen.getByRole("button", { name: action }));
+    expect(await screen.findByText(collectionLabel)).toBeInTheDocument();
+    await waitFor(() => expect(api.probePlaylistItem).toHaveBeenCalledWith("0:liked-song", "https://music.youtube.com/watch?v=liked-song", cookies, expect.any(String), expect.any(String)));
+    expect(api.probePlaylist).toHaveBeenCalledWith("https://music.youtube.com/playlist?list=LM", cookies, expect.any(String));
+    expect(screen.queryByRole("button", { name: action })).not.toBeInTheDocument();
   });
   beforeEach(() => {
     vi.clearAllMocks();

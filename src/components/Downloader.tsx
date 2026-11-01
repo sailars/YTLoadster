@@ -50,6 +50,7 @@ type Props = {
   musicMode?: boolean;
   audioEncoders?: string[] | null;
   sourceHeaderAction?: ReactNode;
+  emptyPreviewAction?: ReactNode;
   authSettings: BrowserAuthSettings;
   defaultDestinationDir?: string | null;
   includeVideoTechnicalDetailsInFilename: boolean;
@@ -76,6 +77,7 @@ export function Downloader({
   musicMode = false,
   audioEncoders = null,
   sourceHeaderAction,
+  emptyPreviewAction,
   authSettings,
   defaultDestinationDir,
   includeVideoTechnicalDetailsInFilename,
@@ -650,6 +652,7 @@ export function Downloader({
       music={musicMode}
       url={url}
       media={media}
+      emptyAction={emptyPreviewAction}
       onOpen={openAnalyzedUrl}
       onCopy={copyAnalyzedUrl}
     />

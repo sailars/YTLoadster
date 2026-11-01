@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { MediaInfo } from "../../lib/types";
 import { useI18n, type Translate } from "../../lib/i18n";
 import { MediaThumbnail } from "../MediaThumbnail";
@@ -8,6 +9,7 @@ type Props = {
   music?: boolean;
   url: string;
   media: MediaInfo | null;
+  emptyAction?: ReactNode;
   onOpen: () => void;
   onCopy: () => void;
 };
@@ -16,6 +18,7 @@ export function MediaPreview({
   music = false,
   url,
   media,
+  emptyAction,
   onOpen,
   onCopy,
 }: Props) {
@@ -53,6 +56,7 @@ export function MediaPreview({
           {music ? <YouTubeMusicIcon /> : <VideoIcon />}
           <strong>{t(music ? "nav.music" : "media.emptyPreviewTitle")}</strong>
           <span>{t(music ? "music.empty" : "media.emptyText")}</span>
+          {emptyAction}
         </div>
       )}
     </div>
