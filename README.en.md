@@ -2,28 +2,32 @@
 
 [Русский](README.md)
 
-YTLoadster is a desktop application for downloading video, audio, and subtitles from YouTube.
+YTLoadster is an application for Windows and macOS for downloading video, audio, and subtitles from YouTube, as well as tracks, albums, and playlists from YouTube Music.
 
-<img width="1320" height="765" alt="YTLoadster main window" src="https://github.com/user-attachments/assets/fbf5a8a6-76a3-4944-af21-2c9e673c9700" />
+<img width="1413" height="890" alt="изображение" src="https://github.com/user-attachments/assets/16d5622f-fa4f-42d8-83ed-6978a06bf19f" />
 
 ## Features
 
-- Automatic YouTube link analysis and selection of available quality options.
-- Video, audio, and subtitle downloads from YouTube.
-- Downloads of selected videos, audio, and subtitles from YouTube playlists.
+- Automatic link analysis and selection of available quality options.
+- Downloads of individual videos, audio, and subtitles.
+- Video, audio, and subtitle downloads from YouTube playlists.
+- Downloads of tracks, albums, playlists, and "liked" songs from YouTube Music.
+- Video/audio conversion to the desired format.
+- Selection of video resolution, FPS, container, and codec.
 - Exact quality selection or automatic matching to the closest available option for playlists.
 - Ready-made video profiles for phones, tablets, Smart TVs, and compatible MP4 playback.
 - Download queue controls: pause, resume, cancel, and retry downloads.
-- History of successfully downloaded files.
-- Configurable numbers of parallel downloads and connections (fragments) per video.
+- Configurable numbers of parallel downloads, connections per file, and retry attempts on errors.
 - Custom User-Agent support for analysis and downloads.
+- Restore the previous session if desired
 - Sleep prevention during active downloads.
+- Checking for updates and updating core components: yt-dlp, Deno, and FFmpeg/FFprobe.
 - Dark theme.
 - Authentication using browser cookies.
 - YouTube sign-in through an isolated browser profile that does not affect the user's regular profile.
 - Proxy configuration: system, HTTP, HTTPS, and SOCKS5.
 - Checking for updates and updating core components.
-- Multiple color themes.
+- Multiple color themes
 
 ## Platforms and releases
 
