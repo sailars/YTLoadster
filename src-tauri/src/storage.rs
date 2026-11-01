@@ -39,6 +39,8 @@ pub struct Settings {
     pub minimize_to_tray: bool,
     pub completion_sound_enabled: bool,
     pub show_thumbnails: bool,
+    pub music_album_folder: bool,
+    pub restore_workspace: bool,
     pub accent_color: String,
     pub proxy_mode: String,
     pub proxy_host: String,
@@ -77,6 +79,8 @@ impl Default for Settings {
             minimize_to_tray: true,
             completion_sound_enabled: false,
             show_thumbnails: true,
+            music_album_folder: true,
+            restore_workspace: false,
             accent_color: "blue".to_string(),
             proxy_mode: "system".to_string(),
             proxy_host: String::new(),
@@ -109,6 +113,8 @@ pub struct SettingsPatch {
     pub minimize_to_tray: Option<bool>,
     pub completion_sound_enabled: Option<bool>,
     pub show_thumbnails: Option<bool>,
+    pub music_album_folder: Option<bool>,
+    pub restore_workspace: Option<bool>,
     pub accent_color: Option<String>,
     pub proxy_mode: Option<String>,
     pub proxy_host: Option<String>,
@@ -133,6 +139,7 @@ pub struct HistoryItem {
     pub completed_at_ms: Option<u64>,
     pub completed_at_legacy: Option<String>,
     pub media_signature: Option<String>,
+    pub history_key: Option<String>,
     pub request: Option<DownloadRequest>,
 }
 
@@ -248,6 +255,12 @@ impl Storage {
             show_thumbnails: get_string_setting(&conn, "show_thumbnails")?
                 .map(|value| value == "true" || value == "1")
                 .unwrap_or(true),
+            music_album_folder: get_string_setting(&conn, "music_album_folder")?
+                .map(|value| value == "true" || value == "1")
+                .unwrap_or(true),
+            restore_workspace: get_string_setting(&conn, "restore_workspace")?
+                .map(|value| value == "true" || value == "1")
+                .unwrap_or(false),
             accent_color: get_string_setting(&conn, "accent_color")?
                 .filter(|value| {
                     matches!(
@@ -290,6 +303,22 @@ impl Storage {
         let conn = self.conn.lock().expect("storage mutex poisoned");
         let password = crate::proxy::load_password(&conn)?;
         crate::proxy::url_for_settings(&settings, password.as_deref())
+    }
+
+    pub fn reset_settings(&self) -> Result<Settings, String> {
+        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let transaction = conn.unchecked_transaction().map_err(|err| err.to_string())?;
+        let has_proxy_password = get_string_setting(&transaction, "proxy_password_set")?
+            .is_some_and(|value| value == "true" || value == "1");
+        transaction
+            .execute("DELETE FROM settings", [])
+            .map_err(|err| err.to_string())?;
+        if has_proxy_password {
+            crate::proxy::save_password(&transaction, "")?;
+        }
+        transaction.commit().map_err(|err| err.to_string())?;
+        drop(conn);
+        self.get_settings()
     }
 
     pub fn update_settings(&self, patch: SettingsPatch) -> Result<Settings, String> {
@@ -479,6 +508,8 @@ impl Storage {
         for (key, value) in [
             ("completion_sound_enabled", patch.completion_sound_enabled),
             ("show_thumbnails", patch.show_thumbnails),
+            ("music_album_folder", patch.music_album_folder),
+            ("restore_workspace", patch.restore_workspace),
         ] {
             if let Some(enabled) = value {
                 upsert_string_setting(&conn, key, if enabled { "true" } else { "false" })?;
@@ -536,6 +567,7 @@ impl Storage {
         let request_json =
             serde_json::to_string(&safe_request).map_err(|error| error.to_string())?;
         let signature = media_signature(request);
+        let history_key = crate::history::request_key(request);
         let file_size_bytes = fs::metadata(output_path)
             .ok()
             .map(|metadata| metadata.len());
@@ -575,8 +607,8 @@ impl Storage {
             "INSERT INTO history (
                 id, url, canonical_source, title, thumbnail, output_path, destination_dir,
                 preset, format_label, file_size_bytes, completed_at, completed_at_ms,
-                media_signature, request_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                media_signature, request_json, history_key
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 &id,
                 &request.url,
@@ -592,6 +624,7 @@ impl Storage {
                 completed_at_db,
                 signature.as_deref(),
                 &request_json,
+                history_key.as_deref(),
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -607,7 +640,7 @@ impl Storage {
             .prepare(
                 "SELECT id, url, canonical_source, title, thumbnail, output_path,
                         destination_dir, preset, format_label, file_size_bytes,
-                        completed_at, completed_at_ms, media_signature, request_json
+                        completed_at, completed_at_ms, media_signature, request_json, history_key
                  FROM history
                  ORDER BY COALESCE(completed_at_ms, 0) DESC, completed_at DESC, rowid DESC",
             )
@@ -641,18 +674,21 @@ impl Storage {
         let mut statement = conn
             .prepare(
                 "SELECT id FROM history
-                 WHERE media_signature = ?1
+                 WHERE history_key = ?1 OR history_key = ?2
+                    OR (?1 IS NULL AND media_signature = ?3)
                  ORDER BY COALESCE(completed_at_ms, 0) DESC, rowid DESC
                  LIMIT 1",
             )
             .map_err(|error| error.to_string())?;
         let mut duplicates = Vec::new();
         for item in items {
-            let Some(signature) = media_signature(&item.request) else {
-                continue;
-            };
+            let key = crate::history::request_key(&item.request);
+            let legacy_key = crate::history::legacy_subtitle_key(&item.request);
+            let signature = media_signature(&item.request);
             let history_id = statement
-                .query_row(params![signature], |row| row.get::<_, String>(0))
+                .query_row(params![key, legacy_key, signature], |row| {
+                    row.get::<_, String>(0)
+                })
                 .optional()
                 .map_err(|error| error.to_string())?;
             if let Some(history_id) = history_id {
@@ -670,7 +706,7 @@ impl Storage {
         conn.query_row(
             "SELECT id, url, canonical_source, title, thumbnail, output_path,
                     destination_dir, preset, format_label, file_size_bytes,
-                    completed_at, completed_at_ms, media_signature, request_json
+                    completed_at, completed_at_ms, media_signature, request_json, history_key
              FROM history WHERE id = ?1",
             params![id],
             history_item_from_row,
@@ -700,7 +736,8 @@ impl Storage {
                 completed_at TEXT NOT NULL,
                 completed_at_ms INTEGER,
                 media_signature TEXT,
-                request_json TEXT
+                request_json TEXT,
+                history_key TEXT
             );
             "#,
         )
@@ -733,6 +770,7 @@ fn ensure_history_schema(conn: &Connection) -> Result<(), String> {
         ("completed_at_ms", "INTEGER"),
         ("media_signature", "TEXT"),
         ("request_json", "TEXT"),
+        ("history_key", "TEXT"),
     ] {
         if !existing.contains(name) {
             conn.execute(
@@ -747,10 +785,52 @@ fn ensure_history_schema(conn: &Connection) -> Result<(), String> {
              ON history(completed_at_ms DESC);
          CREATE INDEX IF NOT EXISTS idx_history_media_signature
              ON history(media_signature);
-         PRAGMA user_version = 2;",
+         CREATE INDEX IF NOT EXISTS idx_history_key ON history(history_key);
+         PRAGMA user_version = 3;",
     )
     .map_err(|error| error.to_string())?;
+    backfill_history_keys(conn)?;
     Ok(())
+}
+
+fn backfill_history_keys(conn: &Connection) -> Result<(), String> {
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let rows = {
+        let mut statement = transaction.prepare(
+            "SELECT id, url, canonical_source, preset, request_json FROM history WHERE history_key IS NULL"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    for (id, url, canonical, preset, json) in rows {
+        let key = json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<DownloadRequest>(json).ok())
+            .and_then(|request| crate::history::request_key(&request))
+            .or_else(|| crate::history::key_for_source(&url, canonical.as_deref(), &preset, None));
+        if let Some(key) = key {
+            transaction
+                .execute(
+                    "UPDATE history SET history_key = ?1 WHERE id = ?2",
+                    params![key, id],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 fn history_item_from_row(row: &Row<'_>) -> rusqlite::Result<HistoryItem> {
@@ -791,6 +871,7 @@ fn history_item_from_row(row: &Row<'_>) -> rusqlite::Result<HistoryItem> {
         completed_at_ms,
         completed_at_legacy,
         media_signature: row.get(12)?,
+        history_key: row.get(14)?,
         request,
     })
 }
@@ -802,6 +883,8 @@ fn preset_name(preset: &DownloadPreset) -> &'static str {
         DownloadPreset::AudioMp3 => "audioMp3",
         DownloadPreset::AudioM4a => "audioM4a",
         DownloadPreset::AudioOpus => "audioOpus",
+        DownloadPreset::AudioSource => "audioSource",
+        DownloadPreset::AudioFlac => "audioFlac",
         DownloadPreset::Subtitles => "subtitles",
     }
 }
@@ -903,6 +986,42 @@ pub fn update_settings(
 ) -> Result<Settings, String> {
     let settings = storage.update_settings(patch)?;
     let proxy_url = storage.effective_proxy_url()?;
+    apply_runtime_settings(&settings, proxy_url, &manager, &ytdlp_runtime_settings, &sleep_inhibitor, &tray);
+    schedule_pending_downloads(manager.inner().clone(), app);
+    Ok(settings)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetSettingsResult {
+    settings: Settings,
+    default_destination_dir: PathBuf,
+}
+
+#[tauri::command]
+pub fn reset_settings(
+    storage: State<'_, Storage>,
+    manager: State<'_, DownloadManager>,
+    ytdlp_runtime_settings: State<'_, YtdlpRuntimeSettings>,
+    sleep_inhibitor: State<'_, SleepInhibitor>,
+    tray: State<'_, TrayController>,
+    app: AppHandle,
+) -> Result<ResetSettingsResult, String> {
+    let default_destination_dir = default_download_dir()?;
+    let settings = storage.reset_settings()?;
+    apply_runtime_settings(&settings, None, &manager, &ytdlp_runtime_settings, &sleep_inhibitor, &tray);
+    schedule_pending_downloads(manager.inner().clone(), app);
+    Ok(ResetSettingsResult { settings, default_destination_dir })
+}
+
+fn apply_runtime_settings(
+    settings: &Settings,
+    proxy_url: Option<String>,
+    manager: &DownloadManager,
+    ytdlp_runtime_settings: &YtdlpRuntimeSettings,
+    sleep_inhibitor: &SleepInhibitor,
+    tray: &TrayController,
+) {
     manager.set_concurrency(settings.concurrency);
     manager.set_fragment_concurrency(settings.fragment_concurrency);
     manager.set_retry_settings(
@@ -914,8 +1033,6 @@ pub fn update_settings(
     ytdlp_runtime_settings.set_proxy_url(proxy_url);
     sleep_inhibitor.set_enabled(settings.prevent_system_sleep_while_downloading);
     tray.set_enabled(settings.minimize_to_tray);
-    schedule_pending_downloads(manager.inner().clone(), app);
-    Ok(settings)
 }
 
 #[tauri::command]
@@ -1009,6 +1126,102 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn workspace_restoration_defaults_off_and_survives_restart_until_reset() {
+        let root = unique_temp_dir();
+        let database = root.join("workspace-setting.sqlite3");
+        let storage = Storage::open(database.clone()).unwrap();
+        assert!(!storage.get_settings().unwrap().restore_workspace);
+        storage.update_settings(SettingsPatch {
+            restore_workspace: Some(true),
+            ..SettingsPatch::default()
+        }).unwrap();
+        drop(storage);
+        let reopened = Storage::open(database).unwrap();
+        assert!(reopened.get_settings().unwrap().restore_workspace);
+        reopened.reset_settings().unwrap();
+        assert!(!reopened.get_settings().unwrap().restore_workspace);
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resets_all_settings_and_preserves_history_and_files_after_restart() {
+        let root = unique_temp_dir();
+        let database = root.join("reset.sqlite3");
+        let output = root.join("keep.mp4");
+        fs::write(&output, b"keep").unwrap();
+        let storage = Storage::open(database.clone()).unwrap();
+        storage.update_settings(SettingsPatch {
+            default_download_dir: Some(root.join("custom")),
+            ytdlp_path: Some(root.join("custom-ytdlp")),
+            ffmpeg_path: Some(root.join("custom-ffmpeg")),
+            ffprobe_path: Some(root.join("custom-ffprobe")),
+            concurrency: Some(8),
+            fragment_concurrency: Some(8),
+            download_retries: Some(7),
+            file_access_retries: Some(7),
+            fragment_retries: Some(7),
+            custom_user_agent_enabled: Some(true),
+            custom_user_agent: Some("Test agent".into()),
+            include_video_technical_details_in_filename: Some(true),
+            filename_template: Some("title-id".into()),
+            filename_collision_policy: Some("replace".into()),
+            playlist_format_selection_mode: Some("adaptive".into()),
+            prevent_system_sleep_while_downloading: Some(true),
+            minimize_to_tray: Some(false),
+            completion_sound_enabled: Some(true),
+            show_thumbnails: Some(false),
+            music_album_folder: Some(false),
+            accent_color: Some("purple".into()),
+            proxy_mode: Some("http".into()),
+            proxy_host: Some("localhost".into()),
+            proxy_port: Some(8080),
+            proxy_username: Some("test".into()),
+            ..SettingsPatch::default()
+        }).unwrap();
+        let history = storage.record_completed_download(1, &history_request(&root), &output).unwrap();
+        assert_eq!(storage.reset_settings().unwrap(), Settings::default());
+        assert_eq!(storage.effective_download_dir().unwrap(), default_download_dir().unwrap());
+        assert_eq!(storage.effective_proxy_url().unwrap(), None);
+        drop(storage);
+        let reopened = Storage::open(database).unwrap();
+        assert_eq!(reopened.get_settings().unwrap(), Settings::default());
+        assert_eq!(reopened.get_history().unwrap(), vec![history]);
+        assert_eq!(fs::read(&output).unwrap(), b"keep");
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_settings_reset_keeps_previous_settings() {
+        let storage = Storage::open_in_memory().unwrap();
+        let previous = storage.update_settings(SettingsPatch {
+            concurrency: Some(8),
+            music_album_folder: Some(false),
+            ..SettingsPatch::default()
+        }).unwrap();
+        storage.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_reset BEFORE DELETE ON settings BEGIN SELECT RAISE(ABORT, 'test failure'); END;"
+        ).unwrap();
+        assert!(storage.reset_settings().is_err());
+        assert_eq!(storage.get_settings().unwrap(), previous);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn settings_reset_clears_saved_proxy_password() {
+        let storage = Storage::open_in_memory().unwrap();
+        storage.update_settings(SettingsPatch {
+            proxy_password: Some("test-password".into()),
+            ..SettingsPatch::default()
+        }).unwrap();
+        assert!(storage.get_settings().unwrap().proxy_password_set);
+        assert_eq!(storage.reset_settings().unwrap(), Settings::default());
+        let conn = storage.conn.lock().unwrap();
+        assert_eq!(crate::proxy::load_password(&conn).unwrap(), None);
+    }
+
+    #[test]
     fn saves_and_loads_default_download_directory() {
         let storage = Storage::open_in_memory().unwrap();
         storage
@@ -1028,6 +1241,37 @@ mod tests {
             storage.effective_download_dir().unwrap(),
             PathBuf::from("C:/Downloads")
         );
+    }
+
+    #[test]
+    fn album_folder_preference_defaults_on_and_is_saved() {
+        let root = unique_temp_dir();
+        let path = root.join("preferences.sqlite3");
+        {
+            let storage = Storage::open(path.clone()).unwrap();
+            assert!(storage.get_settings().unwrap().music_album_folder);
+            storage
+                .update_settings(SettingsPatch {
+                    music_album_folder: Some(false),
+                    ..SettingsPatch::default()
+                })
+                .unwrap();
+        }
+        {
+            let storage = Storage::open(path.clone()).unwrap();
+            assert!(!storage.get_settings().unwrap().music_album_folder);
+            storage
+                .update_settings(SettingsPatch {
+                    music_album_folder: Some(true),
+                    ..SettingsPatch::default()
+                })
+                .unwrap();
+        }
+        {
+            let storage = Storage::open(path).unwrap();
+            assert!(storage.get_settings().unwrap().music_album_folder);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1403,6 +1647,170 @@ mod tests {
     }
 
     #[test]
+    fn history_duplicates_survive_restart_and_parameter_changes_for_every_media_kind() {
+        let root = unique_temp_dir();
+        let path = root.join("history.sqlite3");
+        let presets = [
+            DownloadPreset::BestVideo,
+            DownloadPreset::Mp4Video,
+            DownloadPreset::AudioMp3,
+            DownloadPreset::AudioM4a,
+            DownloadPreset::AudioOpus,
+            DownloadPreset::AudioSource,
+            DownloadPreset::AudioFlac,
+            DownloadPreset::Subtitles,
+        ];
+        let mut requests = Vec::new();
+        let mut saved_ids = Vec::new();
+        {
+            let storage = Storage::open(path.clone()).unwrap();
+            for (index, preset) in presets.into_iter().enumerate() {
+                let mut request = history_request(&root);
+                request.url = format!("https://youtu.be/persistent-{index}");
+                request.canonical_source = Some(format!(
+                    "https://www.youtube.com/watch?v=persistent-{index}"
+                ));
+                request.preset = preset.clone();
+                if preset == DownloadPreset::Subtitles {
+                    request.subtitle = Some(crate::ytdlp::SubtitleSelection {
+                        language: "ru".into(),
+                        format: "srt".into(),
+                        automatic: false,
+                    });
+                } else if index >= 2 {
+                    request.embed_metadata = Some(true);
+                    request.music = Some(serde_json::from_value(serde_json::json!({
+                        "collectionKind":"album", "collectionTitle":"Album", "sourceCodec":"opus",
+                        "metadata":{"title":"Saved title","artist":"Artist","album":"Album","albumArtist":"Artist","year":"2026","trackNumber":1}
+                    })).unwrap());
+                }
+                let output = root.join(format!("finished-{index}.bin"));
+                fs::write(&output, b"downloaded").unwrap();
+                saved_ids.push(
+                    storage
+                        .record_completed_download(index as u64, &request, &output)
+                        .unwrap()
+                        .id,
+                );
+                requests.push(request);
+            }
+        }
+        let storage = Storage::open(path.clone()).unwrap();
+        for (index, request) in requests.iter_mut().enumerate() {
+            request.url =
+                format!("https://music.youtube.com/watch?v=persistent-{index}&list=other&t=30");
+            request.canonical_source = None;
+            request.format_id = Some("new-stream-id".into());
+            request.audio_format_id = Some("new-audio-id".into());
+            request.destination_dir = root.join("different-folder");
+            request.audio_bitrate = Some("192K".into());
+            if let Some(music) = request.music.as_mut() {
+                music.metadata.title = "Different tags".into();
+                music.metadata.album = "Another album".into();
+                music.create_album_folder = false;
+            }
+            if let Some(subtitle) = request.subtitle.as_mut() {
+                subtitle.format = "vtt".into();
+            }
+            if index == 2 {
+                request.preset = DownloadPreset::AudioM4a;
+            }
+        }
+        let items = || {
+            requests
+                .iter()
+                .enumerate()
+                .map(|(index, request)| HistoryCheckItem {
+                    client_id: format!("row-{index}"),
+                    request: request.clone(),
+                })
+                .collect()
+        };
+        let duplicates = storage.check_history_duplicates(items()).unwrap();
+        assert_eq!(duplicates.len(), requests.len());
+        for (index, duplicate) in duplicates.iter().enumerate() {
+            assert_eq!(duplicate.client_id, format!("row-{index}"));
+            assert_eq!(duplicate.history_id, saved_ids[index]);
+        }
+        let mut distinct = requests[0].clone();
+        distinct.preset = DownloadPreset::AudioSource;
+        assert!(storage
+            .check_history_duplicates(vec![HistoryCheckItem {
+                client_id: "different-kind".into(),
+                request: distinct
+            }])
+            .unwrap()
+            .is_empty());
+        let mut other_language = requests[7].clone();
+        other_language.subtitle.as_mut().unwrap().language = "en".into();
+        assert!(storage
+            .check_history_duplicates(vec![HistoryCheckItem {
+                client_id: "other-language".into(),
+                request: other_language
+            }])
+            .unwrap()
+            .is_empty());
+        storage.remove_history_item(&saved_ids[0]).unwrap();
+        assert!(root.join("finished-0.bin").exists());
+        assert_eq!(
+            storage.check_history_duplicates(items()).unwrap().len(),
+            requests.len() - 1
+        );
+        storage.clear_history().unwrap();
+        drop(storage);
+        let storage = Storage::open(path).unwrap();
+        assert!(storage
+            .check_history_duplicates(items())
+            .unwrap()
+            .is_empty());
+        assert!(root.join("finished-1.bin").exists());
+        drop(storage);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_backfills_old_records_without_requests_or_current_signatures() {
+        let root = unique_temp_dir();
+        let path = root.join("legacy-history.sqlite3");
+        let mut request = history_request(&root);
+        let saved;
+        {
+            let storage = Storage::open(path.clone()).unwrap();
+            saved = storage
+                .record_completed_download(1, &request, &root.join("old.mp4"))
+                .unwrap();
+            storage.conn.lock().unwrap().execute(
+                "UPDATE history SET history_key = NULL, media_signature = 'old-signature', request_json = NULL", []
+            ).unwrap();
+        }
+        let storage = Storage::open(path).unwrap();
+        let history = storage.get_history().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, saved.id);
+        assert!(history[0].request.is_none());
+        assert_eq!(history[0].media_signature.as_deref(), Some("old-signature"));
+        assert_eq!(
+            history[0].history_key,
+            crate::history::request_key(&request)
+        );
+        request.url = "https://music.youtube.com/watch?v=history&si=shared".into();
+        request.canonical_source = None;
+        request.format_id = Some("different".into());
+        assert_eq!(
+            storage
+                .check_history_duplicates(vec![HistoryCheckItem {
+                    client_id: "legacy".into(),
+                    request
+                }])
+                .unwrap()[0]
+                .history_id,
+            saved.id
+        );
+        drop(storage);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn clears_history_without_deleting_downloaded_files() {
         let root = unique_temp_dir();
         let output_path = root.join("keep.mp4");
@@ -1454,13 +1862,14 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(schema_version, 2);
+        assert_eq!(schema_version, 3);
         drop(storage);
         fs::remove_dir_all(root).unwrap();
     }
 
     fn history_request(destination_dir: &Path) -> DownloadRequest {
         DownloadRequest {
+            music: None,
             url: "https://youtu.be/history".to_string(),
             canonical_source: Some("https://youtube.com/watch?v=history".to_string()),
             title: Some("History item".to_string()),

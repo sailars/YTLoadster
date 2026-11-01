@@ -17,6 +17,32 @@ const ANALYSIS_CANCELLED_CODE: &str = "analysis-error:cancelled";
 enum AnalysisScope {
     Single,
     Playlist,
+    PlaylistItem,
+    MusicSingle,
+    MusicPlaylist,
+    MusicPlaylistItem,
+}
+
+impl AnalysisScope {
+    fn single(analysis_id: &str) -> Self {
+        if analysis_id.starts_with("music-") {
+            Self::MusicSingle
+        } else {
+            Self::Single
+        }
+    }
+
+    fn playlist(analysis_id: &str) -> Self {
+        if analysis_id.starts_with("music-playlist-item-") {
+            Self::MusicPlaylistItem
+        } else if analysis_id.starts_with("playlist-item-") {
+            Self::PlaylistItem
+        } else if analysis_id.starts_with("music-playlist-") {
+            Self::MusicPlaylist
+        } else {
+            Self::Playlist
+        }
+    }
 }
 
 #[derive(Default)]
@@ -170,7 +196,57 @@ impl YtdlpRuntimeSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MusicMetadata {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub year: String,
+    pub track_number: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicDownloadContext {
+    pub metadata: MusicMetadata,
+    pub collection_kind: String,
+    pub collection_title: Option<String>,
+    pub source_codec: Option<String>,
+    #[serde(default)]
+    pub source_quality: Option<String>,
+    #[serde(default = "default_create_album_folder")]
+    pub create_album_folder: bool,
+}
+
+fn default_create_album_folder() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+struct RawThumbnail {
+    url: Option<String>,
+    width: Option<u64>,
+    height: Option<u64>,
+}
+
+fn best_thumbnail(thumbnails: Option<Vec<RawThumbnail>>) -> Option<String> {
+    thumbnails?
+        .into_iter()
+        .filter(|item| item.url.is_some())
+        .max_by_key(|item| {
+            (
+                item.width.is_some() && item.width == item.height,
+                item.width.unwrap_or(0),
+            )
+        })
+        .and_then(|item| item.url)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaInfo {
+    #[serde(default)]
+    pub music: Option<MusicMetadata>,
     pub title: String,
     pub uploader: Option<String>,
     pub original_language: Option<String>,
@@ -197,6 +273,8 @@ pub struct SubtitleOption {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FormatOption {
+    #[serde(default)]
+    pub has_audio: bool,
     pub format_id: String,
     pub quality_label: String,
     pub kind: FormatKind,
@@ -221,6 +299,8 @@ pub enum FormatKind {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaylistInfo {
+    #[serde(default)]
+    pub music_kind: Option<String>,
     pub id: String,
     pub title: String,
     pub uploader: Option<String>,
@@ -294,6 +374,8 @@ pub enum DownloadPreset {
     AudioMp3,
     AudioM4a,
     AudioOpus,
+    AudioSource,
+    AudioFlac,
     Subtitles,
 }
 
@@ -347,6 +429,8 @@ pub enum CookieSource {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadRequest {
+    #[serde(default)]
+    pub music: Option<MusicDownloadContext>,
     pub url: String,
     #[serde(default)]
     pub canonical_source: Option<String>,
@@ -393,6 +477,16 @@ impl std::error::Error for YtdlpError {}
 
 #[derive(Debug, Deserialize)]
 struct RawMediaInfo {
+    track: Option<String>,
+    artist: Option<String>,
+    artists: Option<Vec<String>>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    album_artists: Option<Vec<String>>,
+    release_date: Option<String>,
+    release_year: Option<u32>,
+    track_number: Option<u32>,
+    thumbnails: Option<Vec<RawThumbnail>>,
     title: Option<String>,
     uploader: Option<String>,
     language: Option<String>,
@@ -434,6 +528,7 @@ struct RawFormat {
 
 #[derive(Debug, Deserialize)]
 struct RawPlaylistInfo {
+    thumbnails: Option<Vec<RawThumbnail>>,
     id: Option<String>,
     title: Option<String>,
     uploader: Option<String>,
@@ -445,6 +540,7 @@ struct RawPlaylistInfo {
 
 #[derive(Debug, Deserialize)]
 struct RawPlaylistEntry {
+    thumbnails: Option<Vec<RawThumbnail>>,
     id: Option<String>,
     url: Option<String>,
     webpage_url: Option<String>,
@@ -487,7 +583,7 @@ pub async fn probe_url(
     runtime_settings: tauri::State<'_, YtdlpRuntimeSettings>,
     analysis_manager: tauri::State<'_, AnalysisProcessManager>,
 ) -> Result<MediaInfo, String> {
-    analysis_manager.begin_session(AnalysisScope::Single, &analysis_id);
+    analysis_manager.begin_session(AnalysisScope::single(&analysis_id), &analysis_id);
     let json = run_json_probe(
         url,
         cookie_source,
@@ -496,7 +592,7 @@ pub async fn probe_url(
         &app,
         ProbeMode::Single,
         &analysis_manager,
-        AnalysisScope::Single,
+        AnalysisScope::single(&analysis_id),
         &analysis_id,
         "single",
     )
@@ -513,8 +609,9 @@ pub async fn probe_playlist(
     app: tauri::AppHandle,
     runtime_settings: tauri::State<'_, YtdlpRuntimeSettings>,
     analysis_manager: tauri::State<'_, AnalysisProcessManager>,
-) -> Result<PlaylistInfo, String> {
-    analysis_manager.begin_session(AnalysisScope::Playlist, &analysis_id);
+) -> Result<PlaylistInfo, ProbeIssue> {
+    analysis_manager.begin_session(AnalysisScope::playlist(&analysis_id), &analysis_id);
+    let source_url = url.clone();
     let json = run_json_probe(
         url,
         cookie_source,
@@ -523,13 +620,50 @@ pub async fn probe_playlist(
         &app,
         ProbeMode::Playlist,
         &analysis_manager,
-        AnalysisScope::Playlist,
+        AnalysisScope::playlist(&analysis_id),
         &analysis_id,
         "playlist",
     )
     .await
-    .map_err(|error| error.user_message())?;
-    parse_playlist_info(&json).map_err(|error| error.to_string())
+    .map_err(|error| classify_probe_issue(&error))?;
+    let mut playlist = parse_playlist_info(&json).map_err(|error| ProbeIssue {
+        code: ProbeIssueCode::Unknown,
+        message: error.to_string(),
+        retryable: false,
+        requires_auth: false,
+    })?;
+    if let Ok(source) = url::Url::parse(&source_url) {
+        if source.host_str() == Some("music.youtube.com") {
+            playlist.music_kind = Some(
+                if playlist.id == "LM"
+                    || source
+                        .query_pairs()
+                        .any(|(key, value)| key == "list" && value == "LM")
+                {
+                    "liked"
+                } else if playlist.id.starts_with("OLAK5uy_")
+                    || source.path().starts_with("/browse/MP")
+                {
+                    "album"
+                } else {
+                    "playlist"
+                }
+                .to_string(),
+            );
+            for entry in &mut playlist.entries {
+                if let Ok(mut entry_url) = url::Url::parse(&entry.url) {
+                    if matches!(
+                        entry_url.host_str(),
+                        Some("www.youtube.com" | "youtube.com")
+                    ) {
+                        let _ = entry_url.set_host(Some("music.youtube.com"));
+                        entry.url = entry_url.to_string();
+                    }
+                }
+            }
+        }
+    }
+    Ok(playlist)
 }
 
 #[tauri::command]
@@ -552,7 +686,7 @@ pub async fn probe_playlist_item(
             &app,
             ProbeMode::Single,
             &analysis_manager,
-            AnalysisScope::Playlist,
+            AnalysisScope::playlist(&analysis_id),
             &analysis_id,
             &request_id,
         )
@@ -584,7 +718,7 @@ pub fn begin_playlist_analysis(
     analysis_id: String,
     analysis_manager: tauri::State<'_, AnalysisProcessManager>,
 ) {
-    analysis_manager.begin_session(AnalysisScope::Playlist, &analysis_id);
+    analysis_manager.begin_session(AnalysisScope::playlist(&analysis_id), &analysis_id);
 }
 
 #[tauri::command]
@@ -592,7 +726,7 @@ pub fn cancel_url_analysis(
     analysis_id: String,
     analysis_manager: tauri::State<'_, AnalysisProcessManager>,
 ) {
-    analysis_manager.cancel_session(AnalysisScope::Single, &analysis_id);
+    analysis_manager.cancel_session(AnalysisScope::single(&analysis_id), &analysis_id);
 }
 
 #[tauri::command]
@@ -600,7 +734,7 @@ pub fn cancel_playlist_analysis(
     analysis_id: String,
     analysis_manager: tauri::State<'_, AnalysisProcessManager>,
 ) {
-    analysis_manager.cancel_session(AnalysisScope::Playlist, &analysis_id);
+    analysis_manager.cancel_session(AnalysisScope::playlist(&analysis_id), &analysis_id);
 }
 
 async fn run_json_probe(
@@ -942,7 +1076,7 @@ pub fn parse_playlist_info(json: &str) -> Result<PlaylistInfo, YtdlpError> {
                 title: entry
                     .title
                     .unwrap_or_else(|| format!("Видео {}", offset + 1)),
-                thumbnail: entry.thumbnail,
+                thumbnail: entry.thumbnail.or_else(|| best_thumbnail(entry.thumbnails)),
                 duration: entry.duration,
                 availability: entry.availability,
             })
@@ -955,8 +1089,10 @@ pub fn parse_playlist_info(json: &str) -> Result<PlaylistInfo, YtdlpError> {
         .map(|durations| durations.into_iter().sum());
     let thumbnail = raw
         .thumbnail
+        .or_else(|| best_thumbnail(raw.thumbnails))
         .or_else(|| entries.iter().find_map(|entry| entry.thumbnail.clone()));
     Ok(PlaylistInfo {
+        music_kind: None,
         id: raw.id.unwrap_or_else(|| "playlist".to_string()),
         title: raw.title.unwrap_or_else(|| "YouTube playlist".to_string()),
         uploader: raw.uploader.or(raw.channel),
@@ -994,13 +1130,54 @@ pub fn parse_media_info(json: &str) -> Result<MediaInfo, YtdlpError> {
     let mut subtitles = subtitle_options(raw.subtitles.take(), false);
     subtitles.extend(subtitle_options(raw.automatic_captions.take(), true));
 
+    let music = (raw.track.is_some()
+        || raw.artists.is_some()
+        || raw.artist.is_some()
+        || raw.album.is_some())
+    .then(|| MusicMetadata {
+        title: raw
+            .track
+            .clone()
+            .or_else(|| raw.title.clone())
+            .unwrap_or_default(),
+        artist: raw
+            .artists
+            .filter(|values| !values.is_empty())
+            .map(|values| values.join(", "))
+            .or(raw.artist)
+            .or_else(|| raw.uploader.clone())
+            .unwrap_or_default(),
+        album: raw.album.unwrap_or_default(),
+        album_artist: raw
+            .album_artists
+            .filter(|values| !values.is_empty())
+            .map(|values| values.join(", "))
+            .or(raw.album_artist)
+            .unwrap_or_default(),
+        year: raw
+            .release_date
+            .as_deref()
+            .and_then(|date| date.get(..4))
+            .filter(|year| year.chars().all(|c| c.is_ascii_digit()))
+            .map(str::to_string)
+            .or_else(|| raw.release_year.map(|year| year.to_string()))
+            .unwrap_or_default(),
+        track_number: raw.track_number,
+    });
+
+    let thumbnail = if music.is_some() {
+        best_thumbnail(raw.thumbnails).or(raw.thumbnail)
+    } else {
+        raw.thumbnail.or_else(|| best_thumbnail(raw.thumbnails))
+    };
     Ok(MediaInfo {
+        music,
         title: raw.title.unwrap_or_else(|| "Untitled video".to_string()),
         uploader: raw.uploader,
         original_language: raw.language,
         duration: raw.duration,
         webpage_url: raw.webpage_url,
-        thumbnail: raw.thumbnail,
+        thumbnail,
         description: raw.description,
         upload_date: raw.upload_date,
         view_count: raw.view_count,
@@ -1160,11 +1337,23 @@ pub fn build_download_args_with_template(
         append_subtitle_args(&mut args, request);
     } else if let Some(format_id) = &request.format_id {
         args.push("-f".to_string());
-        args.push(selected_format_expression(
-            format_id,
-            request.audio_format_id.as_deref(),
-            &request.preset,
-        ));
+        args.push(
+            if request.music.is_some()
+                && matches!(
+                    request.preset,
+                    DownloadPreset::BestVideo | DownloadPreset::Mp4Video
+                )
+                && request.audio_format_id.is_none()
+            {
+                format_id.clone()
+            } else {
+                selected_format_expression(
+                    format_id,
+                    request.audio_format_id.as_deref(),
+                    &request.preset,
+                )
+            },
+        );
         if matches!(request.preset, DownloadPreset::Mp4Video) {
             args.push("--merge-output-format".to_string());
             args.push("mp4".to_string());
@@ -1176,6 +1365,7 @@ pub fn build_download_args_with_template(
         append_preset_args(&mut args, &request.preset);
     }
     append_audio_option_args(&mut args, request);
+    append_music_metadata_args(&mut args, request);
 
     args.push(request.url.clone());
     args
@@ -1294,9 +1484,11 @@ fn selected_format_expression(
         DownloadPreset::BestVideo | DownloadPreset::Mp4Video => audio_format_id
             .map(|audio_format_id| format!("{format_id}+{audio_format_id}"))
             .unwrap_or_else(|| format!("{format_id}+ba/b")),
-        DownloadPreset::AudioMp3 | DownloadPreset::AudioM4a | DownloadPreset::AudioOpus => {
-            format_id.to_string()
-        }
+        DownloadPreset::AudioMp3
+        | DownloadPreset::AudioM4a
+        | DownloadPreset::AudioOpus
+        | DownloadPreset::AudioSource
+        | DownloadPreset::AudioFlac => format_id.to_string(),
         DownloadPreset::Subtitles => format_id.to_string(),
     }
 }
@@ -1316,6 +1508,8 @@ fn append_preset_args(args: &mut Vec<String>, preset: &DownloadPreset) {
         DownloadPreset::AudioMp3 => append_audio_args(args, "mp3"),
         DownloadPreset::AudioM4a => append_audio_args(args, "m4a"),
         DownloadPreset::AudioOpus => append_audio_args(args, "opus"),
+        DownloadPreset::AudioSource => append_audio_args(args, "best"),
+        DownloadPreset::AudioFlac => append_audio_args(args, "flac"),
         DownloadPreset::Subtitles => {}
     }
 }
@@ -1325,6 +1519,8 @@ fn audio_format_for_preset(preset: &DownloadPreset) -> Option<&'static str> {
         DownloadPreset::AudioMp3 => Some("mp3"),
         DownloadPreset::AudioM4a => Some("m4a"),
         DownloadPreset::AudioOpus => Some("opus"),
+        DownloadPreset::AudioSource => Some("best"),
+        DownloadPreset::AudioFlac => Some("flac"),
         DownloadPreset::BestVideo | DownloadPreset::Mp4Video | DownloadPreset::Subtitles => None,
     }
 }
@@ -1355,7 +1551,11 @@ fn append_audio_args(args: &mut Vec<String>, format: &str) {
 fn append_audio_option_args(args: &mut Vec<String>, request: &DownloadRequest) {
     if !matches!(
         request.preset,
-        DownloadPreset::AudioMp3 | DownloadPreset::AudioM4a | DownloadPreset::AudioOpus
+        DownloadPreset::AudioMp3
+            | DownloadPreset::AudioM4a
+            | DownloadPreset::AudioOpus
+            | DownloadPreset::AudioSource
+            | DownloadPreset::AudioFlac
     ) {
         return;
     }
@@ -1384,6 +1584,41 @@ fn append_audio_option_args(args: &mut Vec<String>, request: &DownloadRequest) {
             args.push("ffmpeg:-ac 2".to_string());
         }
         _ => {}
+    }
+}
+
+fn append_music_metadata_args(args: &mut Vec<String>, request: &DownloadRequest) {
+    let Some(music) = &request.music else {
+        return;
+    };
+    if !request.embed_metadata.unwrap_or(false) {
+        return;
+    }
+    let tags = &music.metadata;
+    for (field, value) in [
+        ("title", tags.title.clone()),
+        ("artist", tags.artist.clone()),
+        ("album", tags.album.clone()),
+        ("album_artist", tags.album_artist.clone()),
+        ("date", tags.year.clone()),
+        (
+            "track",
+            tags.track_number
+                .map(|number| number.to_string())
+                .unwrap_or_default(),
+        ),
+    ] {
+        args.extend([
+            "--parse-metadata".to_string(),
+            format!(":(?P<meta_{field}>)"),
+            "--replace-in-metadata".to_string(),
+            format!("meta_{field}"),
+            "(?s)^.*$".to_string(),
+            value.replace('\\', "\\\\"),
+        ]);
+    }
+    if request.embed_thumbnail.unwrap_or(false) {
+        args.extend(["--convert-thumbnails".to_string(), "jpg".to_string()]);
     }
 }
 
@@ -1507,6 +1742,10 @@ fn video_format_option(format: &RawFormat) -> Option<FormatOption> {
         format_id: format.format_id.clone()?,
         quality_label,
         kind: FormatKind::Video,
+        has_audio: format
+            .acodec
+            .as_deref()
+            .is_some_and(|codec| !codec.is_empty() && codec != "none"),
         ext,
         codec: format.vcodec.clone(),
         filesize,
@@ -1541,6 +1780,7 @@ fn audio_format_option(format: &RawFormat) -> Option<FormatOption> {
         format_id: format.format_id.clone()?,
         quality_label,
         kind: FormatKind::Audio,
+        has_audio: true,
         ext,
         codec: format.acodec.clone(),
         filesize,
@@ -1885,6 +2125,67 @@ mod tests {
             .expect("analysis process mutex poisoned");
         assert_eq!(sessions[&AnalysisScope::Single].id, "single-new");
         assert_eq!(sessions[&AnalysisScope::Playlist].id, "playlist-current");
+    }
+
+    #[test]
+    fn music_analysis_does_not_replace_or_cancel_regular_download_analysis() {
+        let manager = AnalysisProcessManager::default();
+        for (scope, id) in [
+            (AnalysisScope::single("single-1"), "single-1"),
+            (AnalysisScope::playlist("playlist-1"), "playlist-1"),
+            (AnalysisScope::single("music-1"), "music-1"),
+            (
+                AnalysisScope::playlist("music-playlist-1"),
+                "music-playlist-1",
+            ),
+        ] {
+            manager.begin_session(scope, id);
+        }
+        manager.begin_session(AnalysisScope::single("music-2"), "music-2");
+        manager.cancel_session(AnalysisScope::single("music-1"), "music-1");
+        manager.cancel_session(
+            AnalysisScope::playlist("music-playlist-1"),
+            "music-playlist-1",
+        );
+        let sessions = manager.sessions.lock().unwrap();
+        assert_eq!(sessions.len(), 3);
+        assert_eq!(sessions[&AnalysisScope::Single].id, "single-1");
+        assert_eq!(sessions[&AnalysisScope::Playlist].id, "playlist-1");
+        assert_eq!(sessions[&AnalysisScope::MusicSingle].id, "music-2");
+    }
+
+    #[test]
+    fn individual_item_analysis_is_independent_of_bulk_analysis() {
+        for prefix in ["playlist", "music-playlist"] {
+            let manager = AnalysisProcessManager::default();
+            let bulk_id = format!("{prefix}-1");
+            let item_id = format!("{prefix}-item-1");
+            let resumed_id = format!("{prefix}-2");
+            let bulk = AnalysisScope::playlist(&bulk_id);
+            let item = AnalysisScope::playlist(&item_id);
+            assert_ne!(bulk, item);
+            manager.begin_session(bulk, &bulk_id);
+            manager.begin_session(item, &item_id);
+            manager.cancel_session(bulk, &bulk_id);
+            assert_eq!(manager.sessions.lock().unwrap()[&item].id, item_id);
+            manager.begin_session(bulk, &resumed_id);
+            manager.cancel_session(item, &item_id);
+            assert_eq!(manager.sessions.lock().unwrap()[&bulk].id, resumed_id);
+        }
+    }
+
+    #[test]
+    fn music_clip_with_embedded_audio_keeps_the_selected_stream() {
+        let request: DownloadRequest = serde_json::from_value(serde_json::json!({
+            "url":"https://music.youtube.com/watch?v=fixture", "preset":"bestVideo", "formatId":"18", "destinationDir":"downloads",
+            "music":{"metadata":{"title":"Song","artist":"Artist","album":"","albumArtist":"","year":"","trackNumber":null},"collectionKind":"single"}
+        })).unwrap();
+        let args = build_download_args(
+            &request,
+            &inventory_with_ytdlp_and_ffmpeg("yt-dlp", "ffmpeg"),
+        );
+        let format = args.windows(2).find(|pair| pair[0] == "-f").unwrap();
+        assert_eq!(format[1], "18");
     }
 
     #[test]
@@ -2349,6 +2650,7 @@ mod tests {
     fn builds_mp3_download_args_with_ffmpeg_location_and_cookies_file() {
         let tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,
@@ -2389,6 +2691,7 @@ mod tests {
     fn builds_subtitle_only_download_args() {
         let tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,
@@ -2427,6 +2730,7 @@ mod tests {
     fn builds_audio_download_args_with_requested_audio_options() {
         let tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,
@@ -2461,6 +2765,7 @@ mod tests {
     fn selected_audio_format_still_converts_to_requested_codec_before_thumbnail_embedding() {
         let tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,
@@ -2496,6 +2801,7 @@ mod tests {
     fn builds_selected_video_quality_with_best_audio_fallback() {
         let tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,
@@ -2528,6 +2834,7 @@ mod tests {
     fn builds_selected_video_with_the_exact_audio_stream() {
         let tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,
@@ -2556,6 +2863,7 @@ mod tests {
     fn preserves_a_complete_legacy_video_and_audio_selector() {
         let tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,
@@ -2586,6 +2894,7 @@ mod tests {
     fn download_args_include_machine_readable_progress_template() {
         let tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,
@@ -2619,6 +2928,7 @@ mod tests {
         let mut tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         tools.js_runtime = found_tool("node", "C:/Program Files/nodejs/node.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,
@@ -2667,6 +2977,7 @@ mod tests {
     fn download_args_force_utf8_encoding() {
         let tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,
@@ -2696,6 +3007,7 @@ mod tests {
     fn download_args_save_files_without_video_id_suffix() {
         let tools = inventory_with_ytdlp_and_ffmpeg("C:/app/yt-dlp.exe", "C:/app/ffmpeg.exe");
         let request = DownloadRequest {
+            music: None,
             url: "https://youtube.com/watch?v=x".to_string(),
             title: Some("Example".to_string()),
             thumbnail: None,

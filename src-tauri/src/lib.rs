@@ -2,6 +2,8 @@ pub mod auth;
 pub mod component_updates;
 pub mod downloads;
 pub mod filesystem;
+mod history;
+pub mod music;
 pub mod notifications;
 pub mod power;
 pub mod proxy;
@@ -161,6 +163,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_status,
             filesystem::get_available_disk_space,
+            music::preview_album_destination,
             open_external_url,
             auth::cancel_youtube_auth,
             auth::cancel_youtube_webview_auth,
@@ -192,8 +195,10 @@ pub fn run() {
             storage::get_settings,
             storage::remove_history_item,
             storage::update_settings,
+            storage::reset_settings,
             tray::set_tray_locale,
             tools::get_tool_status,
+            tools::get_audio_encoders,
             component_updates::check_component_updates,
             component_updates::install_component_update,
             updates::check_for_updates,

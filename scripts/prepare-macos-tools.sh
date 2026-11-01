@@ -3,9 +3,9 @@ set -euo pipefail
 
 # Downloads and build inputs are intentionally pinned. Nothing from this
 # directory is committed: GitHub Actions creates it on a clean macOS runner.
-readonly YTDLP_VERSION="2026.08.19"
+readonly YTDLP_VERSION="2026.10.21"
 readonly YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_macos"
-readonly YTDLP_SHA256="0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"
+readonly YTDLP_SHA256="7a6fe71d7d680f1fb0ac18d4949873d77db2859e90017c0f44bd94b23be4ee40"
 
 readonly DENO_VERSION="2.9.3"
 readonly DENO_ARM64_SHA256="1b2972f7ceb6df28d9600eab18d423bebb9aa18db02f01d7eb37a5b501482203"
@@ -18,6 +18,9 @@ readonly FFMPEG_SHA256="464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74
 readonly LAME_VERSION="3.100"
 readonly LAME_URL="https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz"
 readonly LAME_SHA256="ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
+readonly OPUS_VERSION="1.6.1"
+readonly OPUS_URL="https://downloads.xiph.org/releases/opus/opus-${OPUS_VERSION}.tar.gz"
+readonly OPUS_SHA256="6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1"
 
 if [[ "${1:-}" != "arm64" && "${1:-}" != "x64" ]]; then
   echo "Usage: $0 <arm64|x64>" >&2
@@ -103,7 +106,22 @@ fi
   make install
 )
 
-echo "Building LGPL-only FFmpeg ${FFMPEG_VERSION} with MP3 support for ${BUILD_ARCH}"
+echo "Building static Opus ${OPUS_VERSION} for ${BUILD_ARCH}"
+opus_archive="${WORK_DIR}/opus-${OPUS_VERSION}.tar.gz"
+download_and_verify "$OPUS_URL" "$OPUS_SHA256" "$opus_archive"
+tar -xzf "$opus_archive" -C "$WORK_DIR"
+opus_source="${WORK_DIR}/opus-${OPUS_VERSION}"
+opus_prefix="${WORK_DIR}/opus-install"
+(
+  cd "$opus_source"
+  CFLAGS="${CFLAGS:-} -fPIC" ./configure \
+    --prefix="$opus_prefix" --disable-shared --enable-static \
+    --disable-doc --disable-extra-programs
+  make -j"$(sysctl -n hw.ncpu)"
+  make install
+)
+
+echo "Building LGPL-only FFmpeg ${FFMPEG_VERSION} with MP3 and Opus support for ${BUILD_ARCH}"
 ffmpeg_archive="${WORK_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.xz"
 download_and_verify "$FFMPEG_URL" "$FFMPEG_SHA256" "$ffmpeg_archive"
 tar -xJf "$ffmpeg_archive" -C "$WORK_DIR"
@@ -111,7 +129,7 @@ ffmpeg_source="${WORK_DIR}/ffmpeg-${FFMPEG_VERSION}"
 ffmpeg_prefix="${WORK_DIR}/ffmpeg-install"
 (
   cd "$ffmpeg_source"
-  PKG_CONFIG_PATH="${lame_prefix}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" ./configure \
+  PKG_CONFIG_PATH="${lame_prefix}/lib/pkgconfig:${opus_prefix}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" ./configure \
     --prefix="$ffmpeg_prefix" \
     --disable-gpl \
     --disable-nonfree \
@@ -123,8 +141,9 @@ ffmpeg_prefix="${WORK_DIR}/ffmpeg-install"
     --enable-static \
     --enable-zlib \
     --enable-libmp3lame \
-    --extra-cflags="-I${lame_prefix}/include" \
-    --extra-ldflags="-L${lame_prefix}/lib"
+    --enable-libopus \
+    --extra-cflags="-I${lame_prefix}/include -I${opus_prefix}/include" \
+    --extra-ldflags="-L${lame_prefix}/lib -L${opus_prefix}/lib"
   make -j"$(sysctl -n hw.ncpu)"
   make install
 )
@@ -179,6 +198,7 @@ rewrite_lame_dependency "ffmpeg"
 rewrite_lame_dependency "ffprobe"
 install -m 644 "${ffmpeg_source}/COPYING.LGPLv2.1" "${RESOURCES_DIR}/FFMPEG_LGPL-2.1.txt"
 install -m 644 "${lame_source}/COPYING" "${RESOURCES_DIR}/LAME_LGPL-2.0.txt"
+install -m 644 "${opus_source}/COPYING" "${RESOURCES_DIR}/OPUS_BSD.txt"
 install -m 644 "${PROJECT_ROOT}/LICENSE" "${RESOURCES_DIR}/LICENSE.txt"
 install -m 644 "${PROJECT_ROOT}/THIRD_PARTY_NOTICES.md" "${RESOURCES_DIR}/THIRD_PARTY_NOTICES.md"
 install -m 644 "${PROJECT_ROOT}/licenses/DEPENDENCIES.md" "${RESOURCES_DIR}/DEPENDENCIES.md"
@@ -205,7 +225,7 @@ License: MIT
 FFmpeg ${FFMPEG_VERSION}
 Source: ${FFMPEG_URL}
 Source SHA-256: ${FFMPEG_SHA256}
-Built with: --disable-gpl --disable-nonfree --disable-autodetect --disable-shared --enable-static --enable-zlib --enable-libmp3lame
+Built with: --disable-gpl --disable-nonfree --disable-autodetect --disable-shared --enable-static --enable-zlib --enable-libmp3lame --enable-libopus
 ffmpeg SHA-256: $(sha256 "${TOOLS_DIR}/ffmpeg")
 ffprobe SHA-256: $(sha256 "${TOOLS_DIR}/ffprobe")
 License: LGPL-2.1-or-later; full text: FFMPEG_LGPL-2.1.txt
@@ -217,6 +237,13 @@ Built with: --enable-shared --disable-static --disable-decoder
 Bundled as FFmpeg's dynamic dependency for MP3 encoding; GPL mpglib decoder code is disabled.
 libmp3lame SHA-256: $(sha256 "${TOOLS_DIR}/${LAME_DYLIB_NAME}")
 License: LGPL-2.0; full text: LAME_LGPL-2.0.txt
+
+Opus ${OPUS_VERSION}
+Source: ${OPUS_URL}
+Source SHA-256: ${OPUS_SHA256}
+Built with: --disable-shared --enable-static
+Linked statically into FFmpeg and FFprobe.
+License: BSD-3-Clause; full text: OPUS_BSD.txt
 EOF
 
 # A distributable macOS tool may use Apple system libraries and libraries

@@ -48,6 +48,8 @@ jobs:
             codesign --verify --strict "$tools_dir/$tool"
           done
           "$tools_dir/ffmpeg" -hide_banner -encoders | grep -F 'libmp3lame' >/dev/null
+          "$tools_dir/ffmpeg" -hide_banner -encoders | grep -F 'libopus' >/dev/null
+          "$tools_dir/ffmpeg" -hide_banner -encoders | grep -E '[[:space:]]flac[[:space:]]' >/dev/null
           "$tools_dir/ffmpeg" -hide_banner -encoders | grep -E '[[:space:]]png[[:space:]]' >/dev/null
           smoke_dir="$(mktemp -d)"
           trap 'rm -rf "$smoke_dir"' EXIT
@@ -55,12 +57,20 @@ jobs:
           "$tools_dir/ffmpeg" -y -f lavfi -i 'color=c=blue:s=64x64' -frames:v 1 "$smoke_dir/cover.png"
           "$tools_dir/ffmpeg" -y -i "$smoke_dir/audio.mp3" -i "$smoke_dir/cover.png" -c copy -map 0:0 -map 1:0 -id3v2_version 3 "$smoke_dir/audio-with-cover.mp3"
           "$tools_dir/ffprobe" -v error -select_streams v:0 -show_entries stream_disposition=attached_pic -of default=noprint_wrappers=1:nokey=1 "$smoke_dir/audio-with-cover.mp3" | grep -x '1'
+          "$tools_dir/ffmpeg" -v error -y -i "$smoke_dir/audio.mp3" -c:a aac "$smoke_dir/audio.m4a"
+          for output in opus flac; do
+            encoder="$output"
+            if [[ "$output" == "opus" ]]; then encoder="libopus"; fi
+            "$tools_dir/ffmpeg" -v error -y -i "$smoke_dir/audio.m4a" -c:a "$encoder" -metadata title='Music smoke' "$smoke_dir/audio.$output"
+            "$tools_dir/ffprobe" -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$smoke_dir/audio.$output" | grep -x "$output"
+          done
           staging="$smoke_dir/component"
           mkdir -p "$staging"
           cp "$tools_dir/ffmpeg" "$tools_dir/ffprobe" "$tools_dir/libmp3lame.0.dylib" "$staging/"
-          cp src-tauri/resources/macos/FFMPEG_LGPL-2.1.txt src-tauri/resources/macos/LAME_LGPL-2.0.txt "$staging/"
+          cp src-tauri/resources/macos/FFMPEG_LGPL-2.1.txt src-tauri/resources/macos/LAME_LGPL-2.0.txt src-tauri/resources/macos/OPUS_BSD.txt "$staging/"
           ffmpeg_version="$(sed -nE 's/^readonly FFMPEG_VERSION="([0-9.]+)"$/\1/p' scripts/prepare-macos-tools.sh)"
           lame_version="$(sed -nE 's/^readonly LAME_VERSION="([0-9.]+)"$/\1/p' scripts/prepare-macos-tools.sh)"
+          opus_version="$(sed -nE 's/^readonly OPUS_VERSION="([0-9.]+)"$/\1/p' scripts/prepare-macos-tools.sh)"
           cat > "$staging/COMPONENTS.txt" <<EOF
           YTLoadster macOS FFmpeg component set
           Architecture: ${{ matrix.architecture }}
@@ -73,9 +83,12 @@ jobs:
           Source: https://downloads.sourceforge.net/project/lame/lame/${lame_version}/lame-${lame_version}.tar.gz
           libmp3lame SHA-256: $(shasum -a 256 "$staging/libmp3lame.0.dylib" | awk '{print $1}')
           License: LGPL-2.0; see LAME_LGPL-2.0.txt
+          Opus: ${opus_version}; statically linked into FFmpeg and FFprobe
+          Source: https://downloads.xiph.org/releases/opus/opus-${opus_version}.tar.gz
+          License: BSD-3-Clause; see OPUS_BSD.txt
           EOF
           tar -czf "ffmpeg-macos-${{ matrix.architecture }}.tar.gz" -C "$staging" \
-            ffmpeg ffprobe libmp3lame.0.dylib FFMPEG_LGPL-2.1.txt LAME_LGPL-2.0.txt COMPONENTS.txt
+            ffmpeg ffprobe libmp3lame.0.dylib FFMPEG_LGPL-2.1.txt LAME_LGPL-2.0.txt OPUS_BSD.txt COMPONENTS.txt
           shasum -a 256 "ffmpeg-macos-${{ matrix.architecture }}.tar.gz"
 
       - uses: actions/upload-artifact@v4

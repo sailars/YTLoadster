@@ -2,8 +2,9 @@ import { useState, type FocusEvent, type MouseEvent, type PointerEvent } from "r
 import { useI18n } from "../lib/i18n";
 import type { ThemePreference } from "../lib/theme";
 import { PlaylistDownloadIcon } from "./PlaylistDownloadIcon";
+import { YouTubeMusicIcon } from "./YouTubeMusicIcon";
 
-export type AppSection = "new" | "playlist" | "queue" | "history" | "settings";
+export type AppSection = "new" | "playlist" | "music" | "queue" | "history" | "settings";
 
 type Props = {
   active: AppSection;
@@ -17,14 +18,15 @@ type Props = {
   onSettings: () => void;
 };
 
-const navigation: Array<{ key: AppSection; label: "nav.newDownload" | "nav.playlist" | "nav.queue" | "nav.history"; icon: IconName }> = [
+const navigation: Array<{ key: AppSection; label: "nav.newDownload" | "nav.playlist" | "nav.music" | "nav.queue" | "nav.history"; icon: IconName }> = [
   { key: "new", label: "nav.newDownload", icon: "download" },
   { key: "playlist", label: "nav.playlist", icon: "playlist" },
+  { key: "music", label: "nav.music", icon: "music" },
   { key: "queue", label: "nav.queue", icon: "queue" },
   { key: "history", label: "nav.history", icon: "history" },
 ];
 
-type IconName = "download" | "playlist" | "queue" | "history" | "bell" | "bellOff" | "sun" | "moon" | "systemTheme" | "settings";
+type IconName = "download" | "playlist" | "music" | "queue" | "history" | "bell" | "bellOff" | "sun" | "moon" | "systemTheme" | "settings";
 
 export const sidebarPinnedStorageKey = "ytloadster.sidebarPinned";
 
@@ -213,6 +215,7 @@ function SidebarUtility({
 }
 
 function SidebarIcon({ name }: { name: IconName }) {
+  if (name === "music") return <YouTubeMusicIcon />;
   if (name === "download") return (
     <svg className="download-tray-icon" aria-hidden="true" viewBox="0 0 24 24">
       <path d="M12 3v10m-4-4 4 4 4-4" />

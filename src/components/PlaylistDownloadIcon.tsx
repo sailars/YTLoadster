@@ -1,14 +1,9 @@
 export function PlaylistDownloadIcon() {
   return (
-    <svg className="playlist-download-icon" aria-hidden="true" viewBox="0 0 24 24">
-      <rect x="3" y="3.5" width="6" height="4.5" rx="0.8" />
-      <rect x="3" y="9.75" width="6" height="4.5" rx="0.8" />
-      <rect x="3" y="16" width="6" height="4.5" rx="0.8" />
-      <path className="playlist-play" d="m5.35 4.7 2.2 1.05-2.2 1.05Z" />
-      <path className="playlist-play" d="m5.35 10.95 2.2 1.05-2.2 1.05Z" />
-      <path className="playlist-play" d="m5.35 17.2 2.2 1.05-2.2 1.05Z" />
-      <path d="M11 5.75h6M11 12h4M11 18.25h3" />
-      <path d="M19 10.5v10m-3-3 3 3 3-3" />
+    <svg className="playlist-download-icon" aria-hidden="true" viewBox="0 0 24 24" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5.5 4.8A2.3 2.3 0 0 1 7.8 2.5h8.4a2.3 2.3 0 0 1 2.3 2.3" />
+      <path d="M7 7h10a4 4 0 0 1 3.95 4.65l-1 6A4 4 0 0 1 16 21H8a4 4 0 0 1-3.95-3.35l-1-6A4 4 0 0 1 7 7Z" />
+      <path d="M10.2 11.3a.8.8 0 0 0-1.2.7v4a.8.8 0 0 0 1.2.7l3.6-2a.8.8 0 0 0 0-1.4Z" />
     </svg>
   );
 }

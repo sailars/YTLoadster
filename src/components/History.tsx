@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useI18n, type TranslationKey } from "../lib/i18n";
+import { matchesPlaylistSearch } from "../lib/playlistSorting";
 import type { HistoryItem } from "../lib/types";
 
 type Props = {
@@ -16,6 +17,12 @@ export function History({ items, showThumbnails = true, onOpenFolder, onRepeat, 
   const [confirmClear, setConfirmClear] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [search, setSearch] = useState("");
+  const searchInput = useRef<HTMLInputElement>(null);
+  const filteredItems = items.filter((item) => {
+    const metadata = item.request?.music?.metadata;
+    return matchesPlaylistSearch(search, `${item.title} ${metadata?.title ?? ""}`, `${metadata?.artist ?? ""} ${metadata?.albumArtist ?? ""}`);
+  });
 
   async function remove(id: string) {
     setBusyId(id);
@@ -49,15 +56,25 @@ export function History({ items, showThumbnails = true, onOpenFolder, onRepeat, 
         </button>
       </div>
 
+      {items.length > 0 ? <div className="playlist-search">
+        <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></svg>
+        <input ref={searchInput} type="search" aria-label={t("playlist.search")} placeholder={t("playlist.search")}
+          value={search} autoComplete="off" spellCheck={false} onChange={(event) => setSearch(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Escape" && search) { event.preventDefault(); event.stopPropagation(); setSearch(""); } }} />
+        {search ? <><span className="playlist-search-count" role="status">{t("playlist.searchCount", { count: filteredItems.length, total: items.length })}</span>
+          <button type="button" className="playlist-search-clear" aria-label={t("playlist.clearSearch")} title={t("playlist.clearSearch")}
+            onClick={() => { setSearch(""); searchInput.current?.focus(); }}>×</button></> : null}
+      </div> : null}
+
       {items.length === 0 ? (
         <div className="section-empty history-empty">
           <HistoryIcon />
           <strong>{t("history.emptyTitle")}</strong>
           <span>{t("history.emptyText")}</span>
         </div>
-      ) : (
+      ) : filteredItems.length === 0 ? <div className="playlist-search-empty" role="status">{t("playlist.searchEmpty")}</div> : (
         <ol className="history-list">
-          {items.map((item) => (
+          {filteredItems.map((item) => (
             <li className="history-row" key={item.id} data-no-thumbnail={!showThumbnails || undefined}>
               {showThumbnails ? (item.thumbnail ? <img className="history-thumbnail" src={item.thumbnail} alt="" /> : <div className="history-thumbnail placeholder" />) : null}
               <div className="history-main">

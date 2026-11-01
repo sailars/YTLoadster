@@ -655,29 +655,32 @@ async fn extract_ffmpeg(archive: &Path, payload: &Path) -> Result<(), String> {
             .to_path_buf();
         fs::remove_dir_all(extracted_root).map_err(|_| install_error())?;
     } else {
-        let expected = [
-            "ffmpeg",
-            "ffprobe",
-            "libmp3lame.0.dylib",
-            "FFMPEG_LGPL-2.1.txt",
-            "LAME_LGPL-2.0.txt",
-            "COMPONENTS.txt",
-        ];
-        if entries
-            .iter()
-            .any(|entry| !expected.contains(&entry.as_str()))
-            || expected
-                .iter()
-                .any(|name| !entries.iter().any(|entry| entry == name))
-        {
+        if !valid_macos_ffmpeg_entries(&entries) {
             return Err(install_error());
         }
         extract_archive(archive, payload, &entries).await?;
-        for name in expected {
+        for name in &entries {
             ensure_regular_file(&payload.join(name))?;
         }
     }
     Ok(())
+}
+
+fn valid_macos_ffmpeg_entries(entries: &[String]) -> bool {
+    let required = [
+        "ffmpeg",
+        "ffprobe",
+        "libmp3lame.0.dylib",
+        "FFMPEG_LGPL-2.1.txt",
+        "LAME_LGPL-2.0.txt",
+        "COMPONENTS.txt",
+    ];
+    entries
+        .iter()
+        .all(|entry| required.contains(&entry.as_str()) || entry == "OPUS_BSD.txt")
+        && required
+            .iter()
+            .all(|name| entries.iter().any(|entry| entry == name))
 }
 
 async fn archive_entries(archive: &Path) -> Result<Vec<String>, String> {
@@ -945,6 +948,28 @@ fn install_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_both_macos_license_inventories_without_allowing_extra_paths() {
+        let mut entries = [
+            "ffmpeg",
+            "ffprobe",
+            "libmp3lame.0.dylib",
+            "FFMPEG_LGPL-2.1.txt",
+            "LAME_LGPL-2.0.txt",
+            "COMPONENTS.txt",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert!(valid_macos_ffmpeg_entries(&entries));
+        entries.push("OPUS_BSD.txt".into());
+        assert!(valid_macos_ffmpeg_entries(&entries));
+        entries.push("../ffmpeg".into());
+        assert!(!valid_macos_ffmpeg_entries(&entries));
+        entries.pop();
+        entries.remove(0);
+        assert!(!valid_macos_ffmpeg_entries(&entries));
+    }
 
     #[test]
     fn checks_official_ffmpeg_releases_without_an_installable_package() {

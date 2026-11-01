@@ -31,6 +31,37 @@ function renderHistory(overrides: Partial<Parameters<typeof History>[0]> = {}) {
 }
 
 describe("History", () => {
+  it("searches titles and saved artists without changing history actions or the total", async () => {
+    const song: HistoryItem = { ...item, id: "song", title: "Новый трек", request: {
+      url: item.url, preset: "audioMp3", destinationDir: "Music", music: {
+        metadata: { title: "Новый трек", artist: "Алёна", albumArtist: "Алёна", album: "", year: "", trackNumber: null },
+        collectionKind: "single", collectionTitle: null, sourceCodec: null,
+      },
+    } };
+    const props = renderHistory({ items: [item, song] });
+    const search = screen.getByRole("searchbox", { name: "Поиск по названию и исполнителю" });
+    await userEvent.type(search, "АЛЕНА новый");
+    expect(screen.getByText("Новый трек")).toBeInTheDocument();
+    expect(screen.queryByText("Историческое видео")).not.toBeInTheDocument();
+    expect(screen.getByText("1 из 2")).toBeInTheDocument();
+    expect(screen.getByLabelText("Записей в истории: 2")).toHaveTextContent("2");
+    await userEvent.click(screen.getByRole("button", { name: "Повторить Новый трек" }));
+    expect(props.onRepeat).toHaveBeenCalledWith(song);
+    await userEvent.clear(search);
+    await userEvent.type(search, "нет совпадений");
+    expect(screen.getByText("Ничего не найдено")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByText("Историческое видео")).toBeInTheDocument();
+    await userEvent.type(search, "новый");
+    await userEvent.click(screen.getByRole("button", { name: "Очистить поиск" }));
+    expect(search).toHaveFocus();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(props.onRemove).not.toHaveBeenCalled();
+    await userEvent.type(search, "новый");
+    await userEvent.click(screen.getByRole("button", { name: "Очистить историю" }));
+    expect(screen.getByRole("dialog", { name: "Очистить всю историю?" })).toBeInTheDocument();
+  });
+
   it("opens the folder from an exact legacy output path when no destination is stored", async () => {
     const props = renderHistory();
 

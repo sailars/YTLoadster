@@ -181,6 +181,7 @@ function QueueRow({
 }) {
   const { locale, t } = useI18n();
   const title = job.request?.title ?? t("queue.untitled");
+  const connectionRetry = job.state === "Running" ? job.connectionRetry : null;
   return (
     <li className="job-row" data-state={job.state.toLowerCase()} data-no-thumbnail={!showThumbnails || undefined}>
       {showThumbnails ? <MediaThumbnail
@@ -193,7 +194,7 @@ function QueueRow({
       <div className="job-main">
         <div className="queue-job-heading">
           <QueueJobTitle title={title} jobId={job.id} />
-          <span className={`queue-state-badge state-${job.state.toLowerCase()}`}>{jobStatus(job, t)}</span>
+          <span className={`queue-state-badge state-${job.state.toLowerCase()}${connectionRetry ? " is-reconnecting" : ""}`}>{jobStatus(job, t)}</span>
         </div>
         <span className="job-url">{job.request?.url ?? ""}</span>
         <span className="job-params">{downloadParameters(job, locale, t)}</span>
@@ -208,12 +209,16 @@ function QueueRow({
             {!isProcessingPhase(job) ? (
               <small className="queue-progress-copy">
                 <span>{job.progressPercent ?? 0}%</span>
-                {job.state === "Running" && job.speed ? <span>{job.speed}</span> : null}
-                {job.state === "Running" && job.eta ? <span>{t("queue.remaining", { eta: job.eta })}</span> : null}
+                {job.state === "Running" && !connectionRetry && job.speed ? <span>{job.speed}</span> : null}
+                {job.state === "Running" && !connectionRetry && job.eta ? <span>{t("queue.remaining", { eta: job.eta })}</span> : null}
               </small>
             ) : null}
           </>
         ) : null}
+        {connectionRetry ? <div className="queue-connection-notice warning-notice" role="status" aria-live="polite" aria-atomic="true">
+          <svg className="queue-connection-spinner" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M20 7v5h-5M4 17v-5h5M6.1 6.1A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.9 5.9" /></svg>
+          <span>{t("queue.reconnecting", { attempt: connectionRetry.attempt, limit: connectionRetry.limit })}</span>
+        </div> : null}
         {job.error ? <p className="error">{localizedJobError(job.error, locale, t)}</p> : null}
       </div>
       <div className="job-actions">
@@ -369,6 +374,7 @@ function jobStatus(job: Job, t: Translate) {
   if (job.state !== "Running") {
     return t(`state.${job.state}` as TranslationKey);
   }
+  if (job.connectionRetry) return t("queue.noConnection");
 
   switch (job.phase) {
     case "DownloadingVideo":

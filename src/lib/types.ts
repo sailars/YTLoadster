@@ -56,6 +56,7 @@ export type ToolInventory = {
 };
 
 export type FormatOption = {
+  hasAudio?: boolean;
   formatId: string;
   qualityLabel: string;
   kind: "video" | "audio";
@@ -71,6 +72,7 @@ export type FormatOption = {
 };
 
 export type MediaInfo = {
+  music?: MusicMetadata | null;
   title: string;
   uploader?: string | null;
   originalLanguage?: string | null;
@@ -98,6 +100,8 @@ export type DownloadPreset =
   | "audioMp3"
   | "audioM4a"
   | "audioOpus"
+  | "audioSource"
+  | "audioFlac"
   | "subtitles";
 
 export type VideoDownloadProfile =
@@ -173,6 +177,8 @@ export type AppSettings = {
   minimizeToTray: boolean;
   completionSoundEnabled: boolean;
   showThumbnails: boolean;
+  musicAlbumFolder?: boolean;
+  restoreWorkspace?: boolean;
   accentColor: "blue" | "purple" | "cyan" | "green" | "orange" | "pink";
   proxyMode: "system" | "none" | "http" | "https" | "socks5";
   proxyHost: string;
@@ -194,6 +200,7 @@ export type VideoTechnicalDetails = {
 };
 
 export type DownloadRequest = {
+  music?: MusicDownloadContext | null;
   url: string;
   canonicalSource?: string | null;
   title?: string | null;
@@ -223,6 +230,7 @@ export type Job = {
   request: DownloadRequest;
   state: JobState;
   phase?: JobPhase | null;
+  connectionRetry?: { attempt: number; limit: number } | null;
   progressPercent?: number | null;
   speed?: string | null;
   eta?: string | null;
@@ -230,6 +238,7 @@ export type Job = {
 };
 
 export type PlaylistInfo = {
+  musicKind?: "album" | "playlist" | "liked" | null;
   id: string;
   title: string;
   uploader?: string | null;
@@ -327,6 +336,7 @@ export type HistoryItem = {
   completedAtMs?: number | null;
   completedAtLegacy?: string | null;
   mediaSignature?: string | null;
+  historyKey?: string | null;
   request?: DownloadRequest | null;
 };
 
@@ -335,4 +345,22 @@ export type DownloadFinishedEvent = {
   history?: HistoryItem | null;
   outputPath: string;
   historyError?: string | null;
+};
+
+export type MusicMetadata = {
+  title: string;
+  artist: string;
+  album: string;
+  albumArtist: string;
+  year: string;
+  trackNumber: number | null;
+};
+
+export type MusicDownloadContext = {
+  metadata: MusicMetadata;
+  collectionKind: "single" | "album" | "playlist" | "liked";
+  collectionTitle: string | null;
+  sourceCodec: string | null;
+  sourceQuality?: string;
+  createAlbumFolder?: boolean;
 };
